@@ -14,7 +14,548 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      bitrate_records: {
+        Row: {
+          bitrate_value: number
+          channel_id: string
+          created_at: string
+          id: string
+          operator_id: string | null
+          recorded_at: string
+          shift_time: Database["public"]["Enums"]["shift_time"]
+        }
+        Insert: {
+          bitrate_value: number
+          channel_id: string
+          created_at?: string
+          id?: string
+          operator_id?: string | null
+          recorded_at?: string
+          shift_time: Database["public"]["Enums"]["shift_time"]
+        }
+        Update: {
+          bitrate_value?: number
+          channel_id?: string
+          created_at?: string
+          id?: string
+          operator_id?: string | null
+          recorded_at?: string
+          shift_time?: Database["public"]["Enums"]["shift_time"]
+        }
+        Relationships: [
+          {
+            foreignKeyName: "bitrate_records_channel_id_fkey"
+            columns: ["channel_id"]
+            isOneToOne: false
+            referencedRelation: "channels"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "bitrate_records_operator_id_fkey"
+            columns: ["operator_id"]
+            isOneToOne: false
+            referencedRelation: "operators"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      channels: {
+        Row: {
+          bitrate: number | null
+          created_at: string
+          frequency: string | null
+          id: string
+          modulation: string | null
+          name: string
+          polarization: string | null
+          satellite_id: string | null
+          status: Database["public"]["Enums"]["channel_status"] | null
+          stream_url: string | null
+          symbol_rate: string | null
+          updated_at: string
+        }
+        Insert: {
+          bitrate?: number | null
+          created_at?: string
+          frequency?: string | null
+          id?: string
+          modulation?: string | null
+          name: string
+          polarization?: string | null
+          satellite_id?: string | null
+          status?: Database["public"]["Enums"]["channel_status"] | null
+          stream_url?: string | null
+          symbol_rate?: string | null
+          updated_at?: string
+        }
+        Update: {
+          bitrate?: number | null
+          created_at?: string
+          frequency?: string | null
+          id?: string
+          modulation?: string | null
+          name?: string
+          polarization?: string | null
+          satellite_id?: string | null
+          status?: Database["public"]["Enums"]["channel_status"] | null
+          stream_url?: string | null
+          symbol_rate?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "channels_satellite_id_fkey"
+            columns: ["satellite_id"]
+            isOneToOne: false
+            referencedRelation: "satellites"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      client_channels: {
+        Row: {
+          channel_id: string
+          client_id: string
+          created_at: string
+          id: string
+        }
+        Insert: {
+          channel_id: string
+          client_id: string
+          created_at?: string
+          id?: string
+        }
+        Update: {
+          channel_id?: string
+          client_id?: string
+          created_at?: string
+          id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "client_channels_channel_id_fkey"
+            columns: ["channel_id"]
+            isOneToOne: false
+            referencedRelation: "channels"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "client_channels_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: false
+            referencedRelation: "clients"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      clients: {
+        Row: {
+          client_name: string
+          created_at: string
+          email: string | null
+          id: string
+          phone1: string
+          phone2: string | null
+          updated_at: string
+        }
+        Insert: {
+          client_name: string
+          created_at?: string
+          email?: string | null
+          id?: string
+          phone1: string
+          phone2?: string | null
+          updated_at?: string
+        }
+        Update: {
+          client_name?: string
+          created_at?: string
+          email?: string | null
+          id?: string
+          phone1?: string
+          phone2?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      dtl: {
+        Row: {
+          client_id: string | null
+          created_at: string
+          date: string
+          dish: string | null
+          encoder: string | null
+          end_time: string
+          fees: number | null
+          from_location: string | null
+          guest_name: string | null
+          id: string
+          issue_description: string | null
+          notes: string | null
+          operator_id: string | null
+          power_amplifier: string | null
+          reason: string | null
+          satellite_id: string | null
+          start_time: string
+          transmission_type: Database["public"]["Enums"]["transmission_type"]
+          updated_at: string
+          via_location: string | null
+        }
+        Insert: {
+          client_id?: string | null
+          created_at?: string
+          date?: string
+          dish?: string | null
+          encoder?: string | null
+          end_time: string
+          fees?: number | null
+          from_location?: string | null
+          guest_name?: string | null
+          id?: string
+          issue_description?: string | null
+          notes?: string | null
+          operator_id?: string | null
+          power_amplifier?: string | null
+          reason?: string | null
+          satellite_id?: string | null
+          start_time: string
+          transmission_type: Database["public"]["Enums"]["transmission_type"]
+          updated_at?: string
+          via_location?: string | null
+        }
+        Update: {
+          client_id?: string | null
+          created_at?: string
+          date?: string
+          dish?: string | null
+          encoder?: string | null
+          end_time?: string
+          fees?: number | null
+          from_location?: string | null
+          guest_name?: string | null
+          id?: string
+          issue_description?: string | null
+          notes?: string | null
+          operator_id?: string | null
+          power_amplifier?: string | null
+          reason?: string | null
+          satellite_id?: string | null
+          start_time?: string
+          transmission_type?: Database["public"]["Enums"]["transmission_type"]
+          updated_at?: string
+          via_location?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "dtl_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: false
+            referencedRelation: "clients"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "dtl_operator_id_fkey"
+            columns: ["operator_id"]
+            isOneToOne: false
+            referencedRelation: "operators"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "dtl_satellite_id_fkey"
+            columns: ["satellite_id"]
+            isOneToOne: false
+            referencedRelation: "sng_satellites"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      issues: {
+        Row: {
+          channel_id: string | null
+          created_at: string
+          description: string | null
+          detail: string | null
+          end_date: string | null
+          id: string
+          issue_type: Database["public"]["Enums"]["issue_type"]
+          operator_id: string | null
+          reason: string | null
+          resolution_reason: string | null
+          satellite_id: string | null
+          start_date: string
+          status: Database["public"]["Enums"]["issue_status"] | null
+          title: string
+          updated_at: string
+        }
+        Insert: {
+          channel_id?: string | null
+          created_at?: string
+          description?: string | null
+          detail?: string | null
+          end_date?: string | null
+          id?: string
+          issue_type: Database["public"]["Enums"]["issue_type"]
+          operator_id?: string | null
+          reason?: string | null
+          resolution_reason?: string | null
+          satellite_id?: string | null
+          start_date?: string
+          status?: Database["public"]["Enums"]["issue_status"] | null
+          title: string
+          updated_at?: string
+        }
+        Update: {
+          channel_id?: string | null
+          created_at?: string
+          description?: string | null
+          detail?: string | null
+          end_date?: string | null
+          id?: string
+          issue_type?: Database["public"]["Enums"]["issue_type"]
+          operator_id?: string | null
+          reason?: string | null
+          resolution_reason?: string | null
+          satellite_id?: string | null
+          start_date?: string
+          status?: Database["public"]["Enums"]["issue_status"] | null
+          title?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "issues_channel_id_fkey"
+            columns: ["channel_id"]
+            isOneToOne: false
+            referencedRelation: "channels"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "issues_operator_id_fkey"
+            columns: ["operator_id"]
+            isOneToOne: false
+            referencedRelation: "operators"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "issues_satellite_id_fkey"
+            columns: ["satellite_id"]
+            isOneToOne: false
+            referencedRelation: "satellites"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      leave_requests: {
+        Row: {
+          created_at: string
+          end_date: string
+          id: string
+          leave_type: Database["public"]["Enums"]["leave_type"]
+          note: string | null
+          operator_id: string
+          start_date: string
+          status: string | null
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          end_date: string
+          id?: string
+          leave_type: Database["public"]["Enums"]["leave_type"]
+          note?: string | null
+          operator_id: string
+          start_date: string
+          status?: string | null
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          end_date?: string
+          id?: string
+          leave_type?: Database["public"]["Enums"]["leave_type"]
+          note?: string | null
+          operator_id?: string
+          start_date?: string
+          status?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "leave_requests_operator_id_fkey"
+            columns: ["operator_id"]
+            isOneToOne: false
+            referencedRelation: "operators"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      notifications: {
+        Row: {
+          created_at: string
+          id: string
+          is_read: boolean | null
+          message: string
+          title: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          is_read?: boolean | null
+          message: string
+          title: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          is_read?: boolean | null
+          message?: string
+          title?: string
+        }
+        Relationships: []
+      }
+      operators: {
+        Row: {
+          active: boolean | null
+          created_at: string
+          email: string | null
+          id: string
+          name: string
+          phone: string | null
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean | null
+          created_at?: string
+          email?: string | null
+          id?: string
+          name: string
+          phone?: string | null
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean | null
+          created_at?: string
+          email?: string | null
+          id?: string
+          name?: string
+          phone?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      satellites: {
+        Row: {
+          created_at: string
+          id: string
+          name: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          name: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          name?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      settings: {
+        Row: {
+          created_at: string
+          id: string
+          key: string
+          updated_at: string
+          value: Json | null
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          key: string
+          updated_at?: string
+          value?: Json | null
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          key?: string
+          updated_at?: string
+          value?: Json | null
+        }
+        Relationships: []
+      }
+      shifts: {
+        Row: {
+          created_at: string
+          date: string
+          id: string
+          notes: string | null
+          operator_id: string | null
+          shift_time: Database["public"]["Enums"]["shift_time"]
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          date: string
+          id?: string
+          notes?: string | null
+          operator_id?: string | null
+          shift_time: Database["public"]["Enums"]["shift_time"]
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          date?: string
+          id?: string
+          notes?: string | null
+          operator_id?: string | null
+          shift_time?: Database["public"]["Enums"]["shift_time"]
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "shifts_operator_id_fkey"
+            columns: ["operator_id"]
+            isOneToOne: false
+            referencedRelation: "operators"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sng_satellites: {
+        Row: {
+          created_at: string
+          dish: string | null
+          encoder: string | null
+          id: string
+          name: string
+          power_amplifier: string | null
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          dish?: string | null
+          encoder?: string | null
+          id?: string
+          name: string
+          power_amplifier?: string | null
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          dish?: string | null
+          encoder?: string | null
+          id?: string
+          name?: string
+          power_amplifier?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
@@ -23,7 +564,20 @@ export type Database = {
       [_ in never]: never
     }
     Enums: {
-      [_ in never]: never
+      channel_status: "active" | "inactive" | "maintenance"
+      issue_status: "open" | "resolved"
+      issue_type: "Image" | "Sound" | "Graphic"
+      leave_type: "annual" | "sick-reported" | "sick-unreported" | "extra"
+      shift_time: "morning" | "evening" | "night"
+      transmission_type:
+        | "SNG"
+        | "TVU"
+        | "AVIWEST"
+        | "UNIVISO"
+        | "LiveU"
+        | "Turnaround"
+        | "SRT Link"
+        | "RTMP Link"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -150,6 +704,22 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      channel_status: ["active", "inactive", "maintenance"],
+      issue_status: ["open", "resolved"],
+      issue_type: ["Image", "Sound", "Graphic"],
+      leave_type: ["annual", "sick-reported", "sick-unreported", "extra"],
+      shift_time: ["morning", "evening", "night"],
+      transmission_type: [
+        "SNG",
+        "TVU",
+        "AVIWEST",
+        "UNIVISO",
+        "LiveU",
+        "Turnaround",
+        "SRT Link",
+        "RTMP Link",
+      ],
+    },
   },
 } as const
