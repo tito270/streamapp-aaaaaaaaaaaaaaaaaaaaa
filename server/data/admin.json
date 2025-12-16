@@ -1,0 +1,9 @@
+[
+  {
+    "id": "stream-1758347902796-pq9vh4gc8",
+    "name": "gfg",
+    "url": "rtmp://163.172.178.94:1935/palestiniantv_source/live",
+    "color": "#8884d8",
+    "resolution": "480p"
+  }
+]

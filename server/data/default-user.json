@@ -1,0 +1,37 @@
+[
+  {
+    "streamId": "365b8ba08be89af2a941f9bfc7ced1f0",
+    "streamUrl": "udp://239.1.1.1:5010",
+    "streamName": "Syria TV Turnaround",
+    "resolution": "480p",
+    "addedAt": 1758162726414
+  },
+  {
+    "streamId": "fa6c8518d2ccfc5f76257d95e1c5432a",
+    "streamUrl": "http://51.15.246.58:8081/palestiniantv_source/live/playlist.m3u8",
+    "streamName": "CDN",
+    "resolution": "480p",
+    "addedAt": 1758162779027
+  },
+  {
+    "streamId": "e3f9a6c70c9bf4fcd86da131e46009a5",
+    "streamUrl": "rtmp://163.172.178.94:1935/palestiniantv_source/live",
+    "streamName": "dfdfdf",
+    "resolution": "480p",
+    "addedAt": 1758164632272
+  },
+  {
+    "streamId": "51950abd8df2e43481fd30230feb595c",
+    "streamUrl": "https://titan2.mediatriple.net/videoonlylive/mttbqgyontxlive/broadcast_67a50d31a6b30.smil/playlist.m3u8",
+    "streamName": "Almagharibia TV",
+    "resolution": null,
+    "addedAt": 1758251409351
+  },
+  {
+    "streamId": "9036b1b0652f12ec44232f4af86e44b6",
+    "streamUrl": "https://cdn.bestream.io:19360/tmc1/tmc1.m3u8",
+    "streamName": "3yoon TV CDN",
+    "resolution": null,
+    "addedAt": 1758251604478
+  }
+]
