@@ -58,7 +58,15 @@ const streamIssueState = new Map(); // streamId -> { startTime: number }
 const procCleanupMap = new Map(); // streamId -> cleanup function for ffmpeg process listeners
 
 function sanitizeFilename(name) {
-    return name.replace(/[<>:"/\\|?*]/g, '_');
+    // Remove path separators and parent directory references to prevent path traversal
+    return path.basename(String(name)).replace(/[<>:"/\\|?*]/g, '_');
+}
+
+// Path traversal protection helper
+function isPathWithin(childPath, parentPath) {
+    const resolved = path.resolve(childPath);
+    const parent = path.resolve(parentPath);
+    return resolved.startsWith(parent + path.sep) || resolved === parent;
 }
 
 // Format server-local time with timezone offset: YYYY-MM-DD HH:MM:SS ±HH:MM
@@ -341,7 +349,23 @@ function makeHlsUrls(streamId) {
 }
 
 // ---------- SSE /events (includes absolute HLS URL) ----------
+// SSE uses query parameter for auth since headers can't be modified after connection
 app.get('/events', (req, res) => {
+  // Verify token from query parameter for SSE connections
+  const token = req.query.token;
+  if (!token) {
+    return res.status(401).json({ error: 'Authentication token required' });
+  }
+  
+  const jwt = require('jsonwebtoken');
+  const JWT_SECRET = process.env.JWT_SECRET;
+  
+  try {
+    jwt.verify(token, JWT_SECRET);
+  } catch (err) {
+    return res.status(403).json({ error: 'Invalid or expired token' });
+  }
+  
   // SSE: clients connect; per-session filtering removed — broadcast to all clients
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
   res.write('\n');
@@ -612,10 +636,10 @@ function startFfmpeg(streamUrl, streamId, resolution= '480p', force = false) {
 }
 
 // ---------- API ----------
-app.post('/start-stream', async (req, res) => {
+app.post('/start-stream', authenticateToken, requirePermission('add_streams'), async (req, res) => {
   const { streamUrl, streamName, resolution } = req.body || {};
   // sessionId ignored on start-stream
-  const username = req.body?.username || null; // optional: persist for this user
+  const username = req.user?.username || req.body?.username || null; // prefer authenticated user
   if (!streamUrl) return res.status(400).send('streamUrl is required');
   const streamId = crypto.createHash('md5').update(streamUrl).digest('hex');
 
@@ -706,7 +730,7 @@ setInterval(() => {
   }
 }, 5000);
 
-app.post('/stop-stream', (req, res) => {
+app.post('/stop-stream', authenticateToken, requirePermission('delete_streams'), (req, res) => {
   const { streamId, streamUrl } = req.body || {};
   // sessionId ignored on stop-stream/restart-stream
   if (!streamId && !streamUrl) return res.status(400).json({ error: 'streamId or streamUrl required' });
@@ -719,7 +743,7 @@ app.post('/stop-stream', (req, res) => {
 });
 
 // Restart stream: kill existing ffmpeg process for the given streamId (or streamUrl -> id) and start a new one reusing the same id
-app.post('/restart-stream', async (req, res) => {
+app.post('/restart-stream', authenticateToken, requirePermission('add_streams'), async (req, res) => {
   const { streamId, streamUrl, streamName, resolution } = req.body || {};
   if (!streamId && !streamUrl) return res.status(400).json({ error: 'streamId or streamUrl required' });
   const id = streamId || crypto.createHash('md5').update(streamUrl).digest('hex');
@@ -771,7 +795,7 @@ app.post('/restart-stream', async (req, res) => {
   }
 });
 
-app.post('/calculate-bitrate', (req, res) => {
+app.post('/calculate-bitrate', authenticateToken, (req, res) => {
   const { streamUrl, streamId } = req.body || {};
   if (!streamId && !streamUrl) return res.status(400).json({ error: 'streamId or streamUrl required' });
   const id = streamId || crypto.createHash('md5').update(streamUrl).digest('hex');
@@ -782,9 +806,26 @@ app.post('/calculate-bitrate', (req, res) => {
 });
 
 // Diagnostic probe: run ffprobe on a source URL and return parsed JSON (fast, short timeout)
-app.post('/probe', (req, res) => {
+// Admin only - can be used for SSRF if not restricted
+app.post('/probe', authenticateToken, (req, res) => {
+  // Only admin can use probe to prevent SSRF attacks
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required for probe endpoint' });
+  }
   const { streamUrl } = req.body || {};
   if (!streamUrl) return res.status(400).json({ error: 'streamUrl required' });
+  
+  // Validate URL to prevent SSRF to internal services
+  try {
+    const url = new URL(streamUrl);
+    const blockedHosts = ['localhost', '127.0.0.1', '0.0.0.0', '::1'];
+    if (blockedHosts.includes(url.hostname)) {
+      return res.status(400).json({ error: 'Localhost URLs not allowed' });
+    }
+  } catch (e) {
+    return res.status(400).json({ error: 'Invalid URL format' });
+  }
+  
   try {
     const { spawn } = require('child_process');
     const args = ['-v', 'error', '-show_format', '-show_streams', '-print_format', 'json', streamUrl];
@@ -803,7 +844,7 @@ app.post('/probe', (req, res) => {
   } catch (e) { return res.status(500).json({ ok: false, error: String(e) }); }
 });
 
-app.post('/bitrate-history', (req, res) => {
+app.post('/bitrate-history', authenticateToken, (req, res) => {
   const { streamUrl, streamId, maxSamples = 300 } = req.body || {};
   if (!streamId && !streamUrl) return res.status(400).json({ error: 'streamId or streamUrl required' });
   const id = streamId || crypto.createHash('md5').update(streamUrl).digest('hex');
@@ -830,7 +871,7 @@ app.post('/bitrate-history', (req, res) => {
   return res.json({ history: [] });
 });
 
-app.get('/logs/streams', (req, res) => {
+app.get('/logs/streams', authenticateToken, requirePermission('download_logs'), (req, res) => {
   try {
     if (!fs.existsSync(logsDir)) {
       return res.json([]);
@@ -847,14 +888,26 @@ app.get('/logs/streams', (req, res) => {
 });
 
 // Return files in a stream's logs folder. :id may be a folder name or a streamId.
-app.get('/logs/streams/:id/files', (req, res) => {
+app.get('/logs/streams/:id/files', authenticateToken, requirePermission('download_logs'), (req, res) => {
   try {
     const raw = req.params.id || '';
-    const id = String(raw);
+    // Sanitize: only allow basename to prevent path traversal
+    const id = path.basename(String(raw));
+    
+    if (raw !== id || id.includes('..')) {
+      return res.status(400).json({ error: 'Invalid stream ID' });
+    }
+    
     // If the id matches an actual folder, use that. Otherwise, if it's a streamId
     // and we have a mapped stream name, use the sanitized stream name.
     let folderName = null;
-    const directPath = path.join(logsDir, id);
+    const directPath = path.resolve(logsDir, id);
+    
+    // Verify path stays within logsDir
+    if (!isPathWithin(directPath, logsDir)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
     if (fs.existsSync(directPath) && fs.statSync(directPath).isDirectory()) {
       folderName = id;
     } else if (streamNameMap.has(id)) {
@@ -862,7 +915,13 @@ app.get('/logs/streams/:id/files', (req, res) => {
     }
 
     if (!folderName) return res.status(404).json([]);
-    const folderPath = path.join(logsDir, folderName);
+    const folderPath = path.resolve(logsDir, folderName);
+    
+    // Double-check path traversal protection
+    if (!isPathWithin(folderPath, logsDir)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
     if (!fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) return res.status(404).json([]);
     const files = fs.readdirSync(folderPath).filter(f => f.endsWith('.log'));
     return res.json(files);
@@ -872,16 +931,35 @@ app.get('/logs/streams/:id/files', (req, res) => {
   }
 });
 
-app.get('/download-log/:streamId/:filename', (req, res) => {
+app.get('/download-log/:streamId/:filename', authenticateToken, requirePermission('download_logs'), (req, res) => {
   const { streamId, filename } = req.params;
+  
+  // Sanitize filename - allow only basename, no path separators
+  const safeFilename = path.basename(filename);
+  if (filename !== safeFilename || safeFilename.includes('..')) {
+    return res.status(400).send('Invalid filename');
+  }
+  
+  // Whitelist allowed extensions
+  if (!safeFilename.endsWith('.log')) {
+    return res.status(400).send('Only .log files allowed');
+  }
   
   const streamName = streamNameMap.get(streamId) || streamId;
   const sanitizedStreamName = sanitizeFilename(streamName);
-  const streamDir = path.join(logsDir, sanitizedStreamName);
+  let streamDir = path.resolve(logsDir, sanitizedStreamName);
+  
+  // Ensure streamDir is within logsDir
+  if (!isPathWithin(streamDir, logsDir)) {
+    return res.status(403).send('Access denied');
+  }
 
   if (!fs.existsSync(streamDir) || !fs.statSync(streamDir).isDirectory()) {
     // Fallback for when streamId is actually the folder name
-    const fallbackDir = path.join(logsDir, streamId);
+    const fallbackDir = path.resolve(logsDir, path.basename(streamId));
+    if (!isPathWithin(fallbackDir, logsDir)) {
+      return res.status(403).send('Access denied');
+    }
     if (!fs.existsSync(fallbackDir) || !fs.statSync(fallbackDir).isDirectory()) {
       return res.status(404).send('Log folder not found for the specified stream.');
     }
@@ -890,9 +968,15 @@ app.get('/download-log/:streamId/:filename', (req, res) => {
   }
 
   try {
-    const logFilePath = path.join(streamDir, filename);
+    const logFilePath = path.resolve(streamDir, safeFilename);
+    
+    // Final check: ensure resolved path is still within streamDir
+    if (!isPathWithin(logFilePath, streamDir)) {
+      return res.status(403).send('Access denied');
+    }
+    
     if (fs.existsSync(logFilePath)) {
-      return res.download(logFilePath, filename, (err) => {
+      return res.download(logFilePath, safeFilename, (err) => {
         if (err) {
           console.error(`Failed to download log file: ${logFilePath}`, err);
           res.status(500).send('Could not download the file.');
@@ -906,7 +990,7 @@ app.get('/download-log/:streamId/:filename', (req, res) => {
   }
 });
 
-app.get('/api/logs/all-files', (req, res) => {
+app.get('/api/logs/all-files', authenticateToken, requirePermission('download_logs'), (req, res) => {
   const allLogs = [];
   try {
     if (!fs.existsSync(logsDir)) {
@@ -952,7 +1036,7 @@ setInterval(() => {}, 1 << 30);
 
 // ---------- Authentication Routes ----------
 const authRoutes = require('./auth').router;
-const authenticateToken = require('./auth').authenticateToken;
+const { authenticateToken, requirePermission } = require('./auth');
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/auth', authRoutes);
@@ -1003,7 +1087,7 @@ app.post('/api/streams', authenticateToken, (req, res) => {
 });
 
 // New endpoint: return active streams (backend truth) so frontend can repopulate UI on load
-app.get('/api/active-streams', (req, res) => {
+app.get('/api/active-streams', authenticateToken, (req, res) => {
   try {
     const out = [];
     for (const [streamId, info] of activeStreams.entries()) {

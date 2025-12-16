@@ -6,7 +6,14 @@ const jwt = require('jsonwebtoken');
 
 const router = express.Router();
 const usersFilePath = path.join(__dirname, 'users.json');
-const JWT_SECRET = 'your_jwt_secret'; // Replace with a strong secret in a real application
+
+// SECURITY: JWT_SECRET must be set via environment variable
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET || JWT_SECRET === 'your_jwt_secret') {
+  console.error('CRITICAL: JWT_SECRET environment variable must be set to a secure value');
+  console.error('Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
+  process.exit(1);
+}
 
 // Middleware to verify token
 const authenticateToken = (req, res, next) => {
@@ -41,6 +48,22 @@ const isAdmin = (req, res, next) => {
         return res.status(403).json({ message: 'Admin access required' });
     }
     next();
+};
+
+// Middleware to require a specific permission
+const requirePermission = (permission) => {
+    return (req, res, next) => {
+        if (!req.user) {
+            return res.status(401).json({ error: 'Authentication required' });
+        }
+        if (req.user.role === 'admin') {
+            return next(); // Admin has all permissions
+        }
+        if (!req.user.roles || !req.user.roles[permission]) {
+            return res.status(403).json({ error: `Permission denied: ${permission} required` });
+        }
+        next();
+    };
 };
 
 // Helper function to read users from the JSON file
@@ -168,5 +191,5 @@ router.post('/user-roles', authenticateToken, isAdmin, (req, res) => {
     res.json({ message: 'User roles updated successfully' });
 });
 
-module.exports = { router, authenticateToken };
+module.exports = { router, authenticateToken, requirePermission };
 

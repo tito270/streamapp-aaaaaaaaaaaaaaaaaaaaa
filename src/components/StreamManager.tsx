@@ -88,6 +88,15 @@ export const StreamManager: React.FC = () => {
   const API_BASE = (import.meta.env.VITE_API_BASE?.replace(/\/+$/, ''))
     || `${window.location.protocol}//${window.location.hostname}:3001`;
 
+  // Helper to get authorization headers for API calls
+  const getAuthHeaders = useCallback(() => {
+    const token = getToken();
+    return {
+      'Content-Type': 'application/json',
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+    };
+  }, []);
+
   // No per-tab session id is used anymore — session ownership removed
 
   // track which streams we've already requested the server to start
@@ -110,12 +119,12 @@ export const StreamManager: React.FC = () => {
       
       // Request server to start transcoding/proxy. The server should handle this idempotently.
       await fetch(`${API_BASE}/start-stream`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ streamUrl: stream.url, streamName: stream.name, resolution: stream.resolution })
+        method: 'POST', headers: getAuthHeaders(), body: JSON.stringify({ streamUrl: stream.url, streamName: stream.name, resolution: stream.resolution })
       }).catch(() => null);
 
       // Request history from server
       const res = await fetch(`${API_BASE}/bitrate-history`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ streamUrl: stream.url, maxSamples: 10000 }) // Fetch more samples
+        method: 'POST', headers: getAuthHeaders(), body: JSON.stringify({ streamUrl: stream.url, maxSamples: 10000 }) // Fetch more samples
       });
       if (res.ok) {
         const json = await res.json();
@@ -368,7 +377,7 @@ export const StreamManager: React.FC = () => {
 
           // If no saved list, ask server for currently active streams to repopulate UI
           try {
-            const resActive = await fetch(`${API_BASE}/api/active-streams`);
+            const resActive = await fetch(`${API_BASE}/api/active-streams`, { headers: getAuthHeaders() });
             if (resActive.ok) {
               const active = await resActive.json();
               if (Array.isArray(active) && active.length > 0) {
@@ -549,8 +558,9 @@ export const StreamManager: React.FC = () => {
   // Real-time updates via Server-Sent Events (SSE)
   useEffect(() => {
     const API_BASE = (import.meta.env.VITE_API_BASE?.replace(/\/+$/, '')) || `${window.location.protocol}//${window.location.hostname}:3001`;
-  const eventsUrl = `${API_BASE.replace(/\/+$/, '')}/events`;
-  const evtSource = new EventSource(eventsUrl);
+    const token = getToken();
+    const eventsUrl = `${API_BASE.replace(/\/+$/, '')}/events${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+    const evtSource = new EventSource(eventsUrl);
 
     const handleEvent = (e) => {
       try {

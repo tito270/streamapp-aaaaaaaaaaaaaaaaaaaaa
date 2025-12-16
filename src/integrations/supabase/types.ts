@@ -10,7 +10,7 @@ export type Database = {
   // Allows to automatically instantiate createClient with right options
   // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
-    PostgrestVersion: "13.0.4"
+    PostgrestVersion: "13.0.5"
   }
   public: {
     Tables: {
@@ -74,6 +74,20 @@ export type Database = {
     }
     Enums: {
       app_role: "user" | "admin"
+      channel_status: "active" | "inactive" | "maintenance"
+      issue_status: "open" | "resolved"
+      issue_type: "Image" | "Sound" | "Graphic"
+      leave_type: "annual" | "sick-reported" | "sick-unreported" | "extra"
+      shift_time: "morning" | "evening" | "night"
+      transmission_type:
+        | "SNG"
+        | "TVU"
+        | "AVIWEST"
+        | "UNIVISO"
+        | "LiveU"
+        | "Turnaround"
+        | "SRT Link"
+        | "RTMP Link"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -202,6 +216,21 @@ export const Constants = {
   public: {
     Enums: {
       app_role: ["user", "admin"],
+      channel_status: ["active", "inactive", "maintenance"],
+      issue_status: ["open", "resolved"],
+      issue_type: ["Image", "Sound", "Graphic"],
+      leave_type: ["annual", "sick-reported", "sick-unreported", "extra"],
+      shift_time: ["morning", "evening", "night"],
+      transmission_type: [
+        "SNG",
+        "TVU",
+        "AVIWEST",
+        "UNIVISO",
+        "LiveU",
+        "Turnaround",
+        "SRT Link",
+        "RTMP Link",
+      ],
     },
   },
 } as const
