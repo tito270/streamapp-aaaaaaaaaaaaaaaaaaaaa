@@ -1,25 +1,36 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { login } from "../lib/auth";
-import { Eye, EyeOff, User, Lock, Loader2, AlertTriangle } from "lucide-react";
+import { Eye, EyeOff, Mail, Lock, Loader2, AlertTriangle } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
+import { supabase } from "@/integrations/supabase/client";
 
 const Login: React.FC = () => {
-  const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(false);
   const [capsLockOn, setCapsLockOn] = useState(false);
-  const [touched, setTouched] = useState({ username: false, password: false });
+  const [touched, setTouched] = useState({ email: false, password: false });
   const navigate = useNavigate();
 
-  // Load remembered username on mount
+  // Check if user is already logged in
   useEffect(() => {
-    const remembered = localStorage.getItem("rememberedUsername");
+    const checkAuth = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session) {
+        navigate("/");
+      }
+    };
+    checkAuth();
+  }, [navigate]);
+
+  // Load remembered email on mount
+  useEffect(() => {
+    const remembered = localStorage.getItem("rememberedEmail");
     if (remembered) {
-      setUsername(remembered);
+      setEmail(remembered);
       setRememberMe(true);
     }
   }, []);
@@ -43,13 +54,18 @@ const Login: React.FC = () => {
   }, [handleKeyDown, handleKeyUp]);
 
   // Validation
-  const usernameError = touched.username && !username.trim() ? "Username is required" : "";
+  const emailError = 
+    touched.email && !email.trim() 
+      ? "Email is required" 
+      : touched.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+      ? "Please enter a valid email"
+      : "";
   const passwordError = touched.password && !password ? "Password is required" : "";
-  const isFormValid = username.trim() && password;
+  const isFormValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && password;
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    setTouched({ username: true, password: true });
+    setTouched({ email: true, password: true });
     
     if (!isFormValid) return;
     
@@ -57,24 +73,38 @@ const Login: React.FC = () => {
     setIsLoading(true);
     
     try {
-      await login(username, password);
+      const { data, error: signInError } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (signInError) {
+        throw signInError;
+      }
       
       // Handle remember me
       if (rememberMe) {
-        localStorage.setItem("rememberedUsername", username);
+        localStorage.setItem("rememberedEmail", email);
       } else {
-        localStorage.removeItem("rememberedUsername");
+        localStorage.removeItem("rememberedEmail");
       }
       
-      window.location.href = '/';
-    } catch (err) {
-      setError((err as Error).message || "Failed to login");
+      navigate("/");
+    } catch (err: any) {
+      const errorMessage = err?.message || "Failed to login";
+      if (errorMessage.includes("Invalid login credentials")) {
+        setError("Invalid email or password. Please try again.");
+      } else if (errorMessage.includes("Email not confirmed")) {
+        setError("Please confirm your email address before logging in.");
+      } else {
+        setError(errorMessage);
+      }
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleBlur = (field: "username" | "password") => {
+  const handleBlur = (field: "email" | "password") => {
     setTouched((prev) => ({ ...prev, [field]: true }));
   };
 
@@ -124,36 +154,36 @@ const Login: React.FC = () => {
         {/* Card */}
         <div className="w-full bg-card rounded-2xl shadow-2xl p-8 pt-16">
           <form onSubmit={handleLogin} className="space-y-5" noValidate>
-            {/* Username field */}
+            {/* Email field */}
             <div>
-              <label htmlFor="username" className="sr-only">
-                Username
+              <label htmlFor="email" className="sr-only">
+                Email
               </label>
               <div
                 className={`flex items-center gap-3 bg-input rounded px-3 py-2.5 transition-all focus-within:ring-2 focus-within:ring-primary ${
-                  usernameError ? "ring-2 ring-destructive" : ""
+                  emailError ? "ring-2 ring-destructive" : ""
                 }`}
               >
-                <User className="h-5 w-5 text-primary shrink-0" aria-hidden="true" />
+                <Mail className="h-5 w-5 text-primary shrink-0" aria-hidden="true" />
                 <input
-                  id="username"
-                  type="text"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  onBlur={() => handleBlur("username")}
-                  placeholder="Username"
-                  autoComplete="username"
+                  id="email"
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  onBlur={() => handleBlur("email")}
+                  placeholder="Email address"
+                  autoComplete="email"
                   aria-required="true"
-                  aria-invalid={!!usernameError}
-                  aria-describedby={usernameError ? "username-error" : undefined}
+                  aria-invalid={!!emailError}
+                  aria-describedby={emailError ? "email-error" : undefined}
                   disabled={isLoading}
                   className="flex-1 bg-transparent text-foreground placeholder-muted-foreground outline-none disabled:opacity-50"
                 />
               </div>
-              {usernameError && (
-                <p id="username-error" className="text-sm text-destructive mt-1.5 flex items-center gap-1">
+              {emailError && (
+                <p id="email-error" className="text-sm text-destructive mt-1.5 flex items-center gap-1">
                   <AlertTriangle className="h-3.5 w-3.5" />
-                  {usernameError}
+                  {emailError}
                 </p>
               )}
             </div>
@@ -219,7 +249,7 @@ const Login: React.FC = () => {
                   checked={rememberMe}
                   onCheckedChange={(checked) => setRememberMe(checked as boolean)}
                   disabled={isLoading}
-                  aria-label="Remember my username"
+                  aria-label="Remember my email"
                 />
                 <label
                   htmlFor="remember"
