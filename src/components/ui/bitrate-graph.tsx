@@ -1,47 +1,72 @@
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 import {
   AreaChart,
   Area,
-  Line,
   XAxis,
   YAxis,
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  Legend,
-  ReferenceLine,
 } from 'recharts';
-
-// Support two modes:
-// 1) Multi-stream full chart: props { data: Array<{time, [streamId]: number|null}>, streams, timeDomain, height }
-// 2) Single-stream compact chart (used by VideoPlayer & BitratePanel): props { data: Array<{time, bitrate}>, color?, maxBitrate? }
 
 export interface SinglePoint {
   time: number;
   bitrate: number;
 }
 
-export interface MultiPoint {
-  time: number;
-  [key: string]: number | null | undefined | boolean;
-}
-
-interface SharedProps {
-  height?: number | string;
-}
-
-interface MultiProps extends SharedProps {
-  // multi-stream
-  data: MultiPoint[];
-  streams: { id: string; name: string; color: string }[];
-  maxBitrate?: number;
-  timeDomain: [number, number];
-}
-
-interface SingleProps extends SharedProps {
-  // single-stream
+interface BitrateGraphProps {
   data: SinglePoint[];
   color?: string;
   maxBitrate?: number;
+  height?: number | string;
 }
 
+const BitrateGraph: React.FC<BitrateGraphProps> = ({ 
+  data, 
+  color = '#22c55e', 
+  maxBitrate,
+  height = 100 
+}) => {
+  const domain = maxBitrate ? [0, maxBitrate] : ['auto', 'auto'];
+  
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <AreaChart data={data} margin={{ top: 5, right: 5, left: 0, bottom: 5 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.3} />
+        <XAxis 
+          dataKey="time" 
+          tick={{ fontSize: 10 }} 
+          stroke="hsl(var(--muted-foreground))"
+          tickFormatter={(val) => {
+            const date = new Date(val);
+            return `${date.getHours()}:${date.getMinutes().toString().padStart(2, '0')}`;
+          }}
+        />
+        <YAxis 
+          domain={domain as [number | string, number | string]}
+          tick={{ fontSize: 10 }} 
+          stroke="hsl(var(--muted-foreground))"
+          tickFormatter={(val) => `${val.toFixed(1)}`}
+        />
+        <Tooltip 
+          contentStyle={{ 
+            backgroundColor: 'hsl(var(--card))', 
+            border: '1px solid hsl(var(--border))',
+            borderRadius: '6px'
+          }}
+          labelFormatter={(val) => new Date(val).toLocaleTimeString()}
+          formatter={(value: number) => [`${value.toFixed(2)} Mbps`, 'Bitrate']}
+        />
+        <Area 
+          type="monotone" 
+          dataKey="bitrate" 
+          stroke={color} 
+          fill={color} 
+          fillOpacity={0.3}
+        />
+      </AreaChart>
+    </ResponsiveContainer>
+  );
+};
+
+export default BitrateGraph;

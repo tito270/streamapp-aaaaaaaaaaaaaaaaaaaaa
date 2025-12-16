@@ -5,7 +5,7 @@ import path from "path";
 export default defineConfig({
   server: {
     host: true, // allow LAN access
-    port: 5173,
+    port: 8080,
     proxy: {
       '/start-stream':      { target: 'http://127.0.0.1:3001', changeOrigin: true },
       '/stop-stream':       { target: 'http://127.0.0.1:3001', changeOrigin: true },
