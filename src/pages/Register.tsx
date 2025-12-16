@@ -2,8 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { Eye, EyeOff, User, Lock, Mail, Loader2, AlertTriangle, CheckCircle } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-
-const API_URL = `http://${window.location.hostname}:3001/auth`;
+import { supabase } from "@/integrations/supabase/client";
 
 const Register: React.FC = () => {
   const [username, setUsername] = useState("");
@@ -23,6 +22,17 @@ const Register: React.FC = () => {
   });
   const navigate = useNavigate();
   const { toast } = useToast();
+
+  // Check if user is already logged in
+  useEffect(() => {
+    const checkAuth = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session) {
+        navigate("/");
+      }
+    };
+    checkAuth();
+  }, [navigate]);
 
   // Detect caps lock
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
@@ -104,24 +114,45 @@ const Register: React.FC = () => {
     setIsLoading(true);
 
     try {
-      const response = await fetch(`${API_URL}/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, email, password }),
+      const redirectUrl = `${window.location.origin}/`;
+      
+      const { data, error: signUpError } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          emailRedirectTo: redirectUrl,
+          data: {
+            username: username,
+          }
+        }
       });
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.message || "Registration failed");
+      if (signUpError) {
+        throw signUpError;
       }
 
-      toast({
-        title: "Registration Successful",
-        description: "Your account has been created. Please login.",
-      });
-      navigate("/login");
-    } catch (err) {
-      setError((err as Error).message || "Failed to register");
+      // Check if email confirmation is required
+      if (data.user && !data.session) {
+        toast({
+          title: "Registration Successful",
+          description: "Please check your email to confirm your account.",
+        });
+        navigate("/login");
+      } else if (data.session) {
+        // User is automatically logged in (email confirmation disabled)
+        toast({
+          title: "Registration Successful",
+          description: "Your account has been created!",
+        });
+        navigate("/");
+      }
+    } catch (err: any) {
+      const errorMessage = err?.message || "Failed to register";
+      if (errorMessage.includes("already registered")) {
+        setError("An account with this email already exists. Please login instead.");
+      } else {
+        setError(errorMessage);
+      }
     } finally {
       setIsLoading(false);
     }
