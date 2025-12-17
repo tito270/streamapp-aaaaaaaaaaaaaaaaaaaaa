@@ -1,25 +1,33 @@
-import { JwtPayload } from 'jwt-decode';
-import { supabase } from './lib/supabaseClient';
+import { JwtPayload } from "jwt-decode";
+import { supabase } from "./supabaseClient";
 
+/**
+ * Payload shape your app expects
+ */
 export interface UserPayload extends JwtPayload {
   username: string;
   role: string;
   roles: Record<string, boolean>;
 }
 
+/**
+ * Clear per-user cached streams on login
+ */
 function clearLocalStreamCacheForUser(username?: string) {
   try {
-    const key = `sm_saved_streams_v1_${username || 'anon'}`;
+    const key = `sm_saved_streams_v1_${username || "anon"}`;
     localStorage.removeItem(key);
   } catch {
     // ignore
   }
 }
 
-// Helper: decode JWT payload safely
-function decodeJwtPayload(token: string): any | null {
+/**
+ * Decode JWT payload safely
+ */
+function decodeJwt(token: string): any | null {
   try {
-    const part = token.split('.')[1];
+    const part = token.split(".")[1];
     if (!part) return null;
     return JSON.parse(atob(part));
   } catch {
@@ -29,72 +37,103 @@ function decodeJwtPayload(token: string): any | null {
 
 /**
  * LOGIN
- * IMPORTANT:
- * Supabase password verification happens inside Supabase Auth.
- * "username" here must be the user's email unless you implement a username->email lookup.
+ * Supabase validates password against DB (secure)
+ * username == email
  */
 export const login = async (username: string, password: string) => {
   const { data, error } = await supabase.auth.signInWithPassword({
-    email: username, // treat username as email
+    email: username.trim().toLowerCase(),
     password,
   });
 
   if (error) throw new Error(error.message);
 
-  const accessToken = data.session?.access_token;
-  if (!accessToken) throw new Error('No session token returned');
+  const session = data.session;
+  if (!session?.access_token) {
+    throw new Error("Login failed: no session returned");
+  }
 
-  // Keep same behavior as your old file: store token + minimal user info
+  const accessToken = session.access_token;
+
+  // Fetch profile from DB (role + permissions)
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("username, role, roles")
+    .eq("id", data.user.id)
+    .maybeSingle();
+
   const user = {
-    username,
-    // If you store role/roles in user_metadata, pull them in:
-    ...(data.user?.user_metadata || {}),
+    username:
+      profile?.username ||
+      data.user.email ||
+      username,
+    role: profile?.role || "user",
+    roles: (profile?.roles || {}) as Record<string, boolean>,
   };
 
-  sessionStorage.setItem('token', accessToken);
-  try {
-    sessionStorage.setItem('user', JSON.stringify(user));
-  } catch {
-    // ignore
-  }
+  // Store session token (short-lived)
+  sessionStorage.setItem("token", accessToken);
+  sessionStorage.setItem("user", JSON.stringify(user));
 
   clearLocalStreamCacheForUser(user.username);
 };
 
+/**
+ * LOGOUT
+ */
 export const logout = async () => {
-  sessionStorage.removeItem('token');
-  sessionStorage.removeItem('user');
-  await supabase.auth.signOut();
+  try {
+    await supabase.auth.signOut();
+  } catch {
+    // ignore
+  }
+  sessionStorage.removeItem("token");
+  sessionStorage.removeItem("user");
 };
 
-export const isAuthenticated = () => {
-  const token = sessionStorage.getItem('token');
+/**
+ * AUTH CHECK
+ */
+export const isAuthenticated = (): boolean => {
+  const token = sessionStorage.getItem("token");
   if (!token) return false;
 
-  // naive expiry check (same idea as your original)
-  const payload = decodeJwtPayload(token);
+  const payload = decodeJwt(token);
   if (!payload?.exp) return false;
+
   return payload.exp * 1000 > Date.now();
 };
 
+/**
+ * GET USER (DB-backed, fallback to token)
+ */
 export const getUser = (): UserPayload | null => {
   try {
-    const raw = sessionStorage.getItem('user');
+    const raw = sessionStorage.getItem("user");
     if (raw) return JSON.parse(raw) as UserPayload;
 
-    const token = sessionStorage.getItem('token');
+    const token = sessionStorage.getItem("token");
     if (!token) return null;
 
-    const payload = decodeJwtPayload(token);
-    return payload as UserPayload;
+    const payload = decodeJwt(token);
+    if (!payload) return null;
+
+    return {
+      username: payload.email || payload.username || "user",
+      role: payload.role || "user",
+      roles: payload.roles || {},
+    } as UserPayload;
   } catch {
     return null;
   }
 };
 
+/**
+ * GET ACCESS TOKEN
+ */
 export const getToken = (): string | null => {
   try {
-    return sessionStorage.getItem('token');
+    return sessionStorage.getItem("token");
   } catch {
     return null;
   }
