@@ -24,7 +24,7 @@ import {
 } from "@/components/ui/select";
 
 import { logout, UserPayload, getToken } from "@/lib/auth";
-import { supabase } from "@/lib/supabaseClient";
+import { supabase } from "@/integrations/supabase/client";
 import ManagementDialog from "./ManagementDialog";
 
 const streamColors = [
