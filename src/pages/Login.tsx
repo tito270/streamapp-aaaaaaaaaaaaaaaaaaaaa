@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { Eye, EyeOff, Mail, Lock, Loader2, AlertTriangle } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
-import { supabase } from "@/lib/supabaseClient";
+import { supabase } from "@/integrations/supabase/client";
 
 const Login: React.FC = () => {
   const [email, setEmail] = useState("");
