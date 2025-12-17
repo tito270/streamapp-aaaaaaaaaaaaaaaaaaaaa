@@ -127,7 +127,7 @@ const Login: React.FC = () => {
                 letterSpacing: "0.32em",
               }}
             >
-              USER LOGIN STREAMWALL
+              WELCOME IN STREAMWALL
             </span>
           </div>
         </div>
