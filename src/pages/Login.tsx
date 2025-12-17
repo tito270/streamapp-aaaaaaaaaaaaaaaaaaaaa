@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { Eye, EyeOff, Mail, Lock, Loader2, AlertTriangle } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
-import { supabase } from "@/integrations/supabase/client";
+import { supabase } from "@/lib/supabaseClient";
 
 const Login: React.FC = () => {
   const [email, setEmail] = useState("");
@@ -19,11 +19,9 @@ const Login: React.FC = () => {
   useEffect(() => {
     const checkAuth = async () => {
       const { data: { session } } = await supabase.auth.getSession();
-      if (session) {
-        navigate("/");
-      }
+      if (session) navigate("/");
     };
-    checkAuth();
+    void checkAuth();
   }, [navigate]);
 
   // Load remembered email on mount
@@ -54,50 +52,44 @@ const Login: React.FC = () => {
   }, [handleKeyDown, handleKeyUp]);
 
   // Validation
-  const emailError = 
-    touched.email && !email.trim() 
-      ? "Email is required" 
+  const emailError =
+    touched.email && !email.trim()
+      ? "Email is required"
       : touched.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
       ? "Please enter a valid email"
       : "";
+
   const passwordError = touched.password && !password ? "Password is required" : "";
   const isFormValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && password;
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setTouched({ email: true, password: true });
-    
+
     if (!isFormValid) return;
-    
+
     setError("");
     setIsLoading(true);
-    
+
     try {
-      const { data, error: signInError } = await supabase.auth.signInWithPassword({
-        email,
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email: email.trim().toLowerCase(),
         password,
       });
 
-      if (signInError) {
-        throw signInError;
-      }
-      
-      // Handle remember me
-      if (rememberMe) {
-        localStorage.setItem("rememberedEmail", email);
-      } else {
-        localStorage.removeItem("rememberedEmail");
-      }
-      
+      if (signInError) throw signInError;
+
+      // Remember email
+      if (rememberMe) localStorage.setItem("rememberedEmail", email);
+      else localStorage.removeItem("rememberedEmail");
+
       navigate("/");
     } catch (err: any) {
-      const errorMessage = err?.message || "Failed to login";
-      if (errorMessage.includes("Invalid login credentials")) {
+      const msg = err?.message || "Failed to login";
+      if (msg.includes("Invalid login credentials")) {
         setError("Invalid email or password. Please try again.");
-      } else if (errorMessage.includes("Email not confirmed")) {
-        setError("Please confirm your email address before logging in.");
       } else {
-        setError(errorMessage);
+        setError(msg);
       }
     } finally {
       setIsLoading(false);
@@ -116,26 +108,15 @@ const Login: React.FC = () => {
           <div className="relative h-full w-full">
             <div
               className="absolute inset-0"
-              style={{
-                backgroundColor: "#cfc79a",
-                transform: "skewX(-24deg)",
-              }}
+              style={{ backgroundColor: "#cfc79a", transform: "skewX(-24deg)" }}
             />
             <div
               className="absolute top-[18px] left-[208px] h-[52px] w-[185px]"
-              style={{
-                backgroundColor: "#1b3240",
-                opacity: 0.9,
-                transform: "skewX(-24deg)",
-              }}
+              style={{ backgroundColor: "#1b3240", opacity: 0.9, transform: "skewX(-24deg)" }}
             />
             <div
               className="absolute top-[8px] left-[250px] h-[48px] w-[170px]"
-              style={{
-                backgroundColor: "#4b7a78",
-                opacity: 0.45,
-                transform: "skewX(-24deg)",
-              }}
+              style={{ backgroundColor: "#4b7a78", opacity: 0.45, transform: "skewX(-24deg)" }}
             />
             <span
               className="absolute left-[82px] top-1/2 -translate-y-1/2"
@@ -146,7 +127,7 @@ const Login: React.FC = () => {
                 letterSpacing: "0.32em",
               }}
             >
-              USER LOGIN  STREAMWALL
+              USER LOGIN STREAMWALL
             </span>
           </div>
         </div>
@@ -154,11 +135,9 @@ const Login: React.FC = () => {
         {/* Card */}
         <div className="w-full bg-card rounded-2xl shadow-2xl p-8 pt-16">
           <form onSubmit={handleLogin} className="space-y-5" noValidate>
-            {/* Email field */}
+            {/* Email */}
             <div>
-              <label htmlFor="email" className="sr-only">
-                Email
-              </label>
+              <label htmlFor="email" className="sr-only">Email</label>
               <div
                 className={`flex items-center gap-3 bg-input rounded px-3 py-2.5 transition-all focus-within:ring-2 focus-within:ring-primary ${
                   emailError ? "ring-2 ring-destructive" : ""
@@ -173,26 +152,22 @@ const Login: React.FC = () => {
                   onBlur={() => handleBlur("email")}
                   placeholder="Email address"
                   autoComplete="email"
-                  aria-required="true"
                   aria-invalid={!!emailError}
-                  aria-describedby={emailError ? "email-error" : undefined}
                   disabled={isLoading}
                   className="flex-1 bg-transparent text-foreground placeholder-muted-foreground outline-none disabled:opacity-50"
                 />
               </div>
               {emailError && (
-                <p id="email-error" className="text-sm text-destructive mt-1.5 flex items-center gap-1">
+                <p className="text-sm text-destructive mt-1.5 flex items-center gap-1">
                   <AlertTriangle className="h-3.5 w-3.5" />
                   {emailError}
                 </p>
               )}
             </div>
 
-            {/* Password field */}
+            {/* Password */}
             <div>
-              <label htmlFor="password" className="sr-only">
-                Password
-              </label>
+              <label htmlFor="password" className="sr-only">Password</label>
               <div
                 className={`flex items-center gap-3 bg-input rounded px-3 py-2.5 transition-all focus-within:ring-2 focus-within:ring-primary ${
                   passwordError ? "ring-2 ring-destructive" : ""
@@ -207,9 +182,7 @@ const Login: React.FC = () => {
                   onBlur={() => handleBlur("password")}
                   placeholder="Password"
                   autoComplete="current-password"
-                  aria-required="true"
                   aria-invalid={!!passwordError}
-                  aria-describedby={passwordError ? "password-error" : undefined}
                   disabled={isLoading}
                   className="flex-1 bg-transparent text-foreground placeholder-muted-foreground outline-none disabled:opacity-50"
                 />
@@ -220,19 +193,17 @@ const Login: React.FC = () => {
                   aria-label={showPassword ? "Hide password" : "Show password"}
                   disabled={isLoading}
                 >
-                  {showPassword ? (
-                    <EyeOff className="h-4 w-4" />
-                  ) : (
-                    <Eye className="h-4 w-4" />
-                  )}
+                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
               </div>
+
               {passwordError && (
-                <p id="password-error" className="text-sm text-destructive mt-1.5 flex items-center gap-1">
+                <p className="text-sm text-destructive mt-1.5 flex items-center gap-1">
                   <AlertTriangle className="h-3.5 w-3.5" />
                   {passwordError}
                 </p>
               )}
+
               {capsLockOn && !passwordError && (
                 <p className="text-sm text-[hsl(var(--stream-warning))] mt-1.5 flex items-center gap-1">
                   <AlertTriangle className="h-3.5 w-3.5" />
@@ -241,7 +212,7 @@ const Login: React.FC = () => {
               )}
             </div>
 
-            {/* Remember me & Forgot password */}
+            {/* Remember me */}
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Checkbox
@@ -249,40 +220,28 @@ const Login: React.FC = () => {
                   checked={rememberMe}
                   onCheckedChange={(checked) => setRememberMe(checked as boolean)}
                   disabled={isLoading}
-                  aria-label="Remember my email"
                 />
-                <label
-                  htmlFor="remember"
-                  className="text-sm text-muted-foreground cursor-pointer select-none"
-                >
+                <label htmlFor="remember" className="text-sm text-muted-foreground cursor-pointer select-none">
                   Remember me
                 </label>
               </div>
-              <Link
-                to="/forgot-password"
-                className="text-sm text-primary hover:text-primary/80 transition-colors"
-                tabIndex={isLoading ? -1 : 0}
-              >
+              <Link to="/forgot-password" className="text-sm text-primary hover:text-primary/80 transition-colors">
                 Forgot password?
               </Link>
             </div>
 
-            {/* Error message */}
+            {/* Error */}
             {error && (
-              <div 
-                role="alert" 
-                className="text-sm text-destructive text-center bg-destructive/10 rounded-md py-2 px-3"
-              >
+              <div role="alert" className="text-sm text-destructive text-center bg-destructive/10 rounded-md py-2 px-3">
                 {error}
               </div>
             )}
 
-            {/* Login button */}
+            {/* Button */}
             <button
               type="submit"
               disabled={isLoading}
               className="w-full py-2.5 bg-primary text-primary-foreground font-semibold rounded shadow hover:bg-primary/90 transition-all disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-              aria-busy={isLoading}
             >
               {isLoading ? (
                 <>
@@ -294,14 +253,9 @@ const Login: React.FC = () => {
               )}
             </button>
 
-            {/* Register link */}
             <p className="text-center text-sm text-muted-foreground">
               Don't have an account?{" "}
-              <Link
-                to="/register"
-                className="text-primary hover:text-primary/80 transition-colors font-medium"
-                tabIndex={isLoading ? -1 : 0}
-              >
+              <Link to="/register" className="text-primary hover:text-primary/80 transition-colors font-medium">
                 Register
               </Link>
             </p>
