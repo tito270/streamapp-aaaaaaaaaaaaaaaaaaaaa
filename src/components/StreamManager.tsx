@@ -1,10 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { VideoPlayer } from "./VideoPlayer";
 import { RotateCcw, Plus, Monitor, History, Save, LogOut, Settings } from "lucide-react";
-import {
-  Card,
-  CardContent,
-} from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/use-toast";
@@ -14,7 +11,9 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+
 const AllBitrateGraph = React.lazy(() => import("./ui/AllBitrateGraph"));
+
 import {
   Select,
   SelectContent,
@@ -23,13 +22,23 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-import { getUser, logout, UserPayload, getToken } from "@/lib/auth";
+import { getUser, logout, UserPayload } from "@/lib/auth";
 import ManagementDialog from "./ManagementDialog";
+import { supabase } from "@/integrations/supabase/client";
 
 const streamColors = [
   "#8884d8", "#82ca9d", "#ffc658", "#ff7300", "#387908", "#ff0000",
   "#0088fe", "#00c49f", "#ffbb28", "#ff8042", "#00cfff", "#ff00ff",
 ];
+
+type DbStream = {
+  id: string;
+  user_id: string;
+  name: string;
+  url: string;
+  resolution: string;
+  color: string | null;
+};
 
 interface Stream {
   id: string;
@@ -50,14 +59,7 @@ export const StreamManager: React.FC = () => {
     `${window.location.protocol}//${window.location.hostname}:3001`;
 
   const { toast } = useToast();
-
-  const getAuthHeaders = useCallback(() => {
-    const token = getToken();
-    return {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    };
-  }, []);
+  const [user, setUser] = useState<UserPayload | null>(null);
 
   const [streams, setStreams] = useState<Stream[]>([]);
   const [streamName, setStreamName] = useState("");
@@ -71,13 +73,9 @@ export const StreamManager: React.FC = () => {
   const [allLogFiles, setAllLogFiles] = useState<{ stream: string; file: string; path: string }[]>([]);
   const [selectedGraphStream, setSelectedGraphStream] = useState<string>("all");
 
-  const [user, setUser] = useState<UserPayload | null>(null);
-
-  // ✅ show management menu for all users
   const [isManagementOpen, setManagementOpen] = useState(false);
 
   const startedStreamsRef = useRef<Set<string>>(new Set());
-  const initialFetchDoneRef = useRef(false);
 
   const sanitizeFilename = (name: string) => String(name || "").replace(/[<>:"/\\|?*]/g, "_");
   const normalizeUrl = (url: string) => url.trim().toLowerCase().replace(/\/$/, "");
@@ -86,12 +84,44 @@ export const StreamManager: React.FC = () => {
     setUser(getUser());
   }, []);
 
+  // ------------ Supabase: load streams ------------
+  const loadStreamsFromDb = useCallback(async () => {
+    const { data: authData } = await supabase.auth.getUser();
+    const authUser = authData?.user;
+    if (!authUser) return;
+
+    const { data, error } = await supabase
+      .from("streams")
+      .select("id, user_id, name, url, resolution, color")
+      .order("created_at", { ascending: true });
+
+    if (error) {
+      toast({ title: "Failed to load streams", description: error.message, variant: "destructive" });
+      return;
+    }
+
+    const mapped: Stream[] = (data || []).map((s: DbStream, idx: number) => ({
+      id: s.id,
+      name: s.name,
+      url: s.url,
+      resolution: s.resolution || "480p",
+      color: s.color || streamColors[idx % streamColors.length],
+    }));
+
+    setStreams(mapped);
+    setTimeout(() => mapped.forEach((s) => ensureStartAndFetchHistory(s)), 20);
+  }, [toast]);
+
+  useEffect(() => {
+    void loadStreamsFromDb();
+  }, [loadStreamsFromDb]);
+
+  // ------------ Start stream + fetch history from your backend (optional) ------------
   const pointsForStream = useCallback(
     (hist: Array<{ time: number; bitrate: number | null; estimated?: boolean }>, streamId: string) => {
       return hist.map((h) => {
         const p: AllBitrateDataPoint = { time: h.time } as AllBitrateDataPoint;
         p[streamId] = typeof h.bitrate === "number" ? h.bitrate : 0;
-        (p as Record<string, number | null | boolean>)[`${streamId}__est`] = !!h.estimated;
         return p;
       });
     },
@@ -101,19 +131,17 @@ export const StreamManager: React.FC = () => {
   const ensureStartAndFetchHistory = useCallback(
     async (stream: Stream) => {
       try {
+        // Start (idempotent)
         await fetch(`${API_BASE}/start-stream`, {
           method: "POST",
-          headers: getAuthHeaders(),
-          body: JSON.stringify({
-            streamUrl: stream.url,
-            streamName: stream.name,
-            resolution: stream.resolution,
-          }),
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ streamUrl: stream.url, streamName: stream.name, resolution: stream.resolution }),
         }).catch(() => null);
 
+        // History
         const res = await fetch(`${API_BASE}/bitrate-history`, {
           method: "POST",
-          headers: getAuthHeaders(),
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ streamUrl: stream.url, maxSamples: 10000 }),
         });
 
@@ -122,17 +150,7 @@ export const StreamManager: React.FC = () => {
           const hist = Array.isArray(json.history) ? json.history : [];
           if (hist.length > 0) {
             const added = pointsForStream(hist, stream.id);
-            setAllBitrateHistory((prev) => {
-              const merged = [...prev, ...added];
-              const mapByTime: Record<number, AllBitrateDataPoint> = {};
-              merged.forEach((m) => {
-                const timeKey = Math.round(m.time / 1000);
-                mapByTime[timeKey] = { ...(mapByTime[timeKey] || { time: m.time }), ...m };
-              });
-              const out = Object.values(mapByTime).sort((a, b) => a.time - b.time);
-              const twentyFourHoursAgo = Date.now() - 24 * 60 * 60 * 1000;
-              return out.filter((p) => p.time >= twentyFourHoursAgo);
-            });
+            setAllBitrateHistory((prev) => [...prev, ...added]);
           }
         }
       } catch (err) {
@@ -141,9 +159,24 @@ export const StreamManager: React.FC = () => {
         startedStreamsRef.current.add(stream.id);
       }
     },
-    [API_BASE, getAuthHeaders, pointsForStream]
+    [API_BASE, pointsForStream]
   );
 
+  useEffect(() => {
+    streams.forEach((s) => {
+      if (!startedStreamsRef.current.has(s.id)) {
+        ensureStartAndFetchHistory(s);
+      }
+    });
+  }, [streams, ensureStartAndFetchHistory]);
+
+  // ------------ Clock ------------
+  useEffect(() => {
+    const t = setInterval(() => setCurrentTime(new Date()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  // ------------ Logs list (optional) ------------
   useEffect(() => {
     let mounted = true;
     const fetchLogs = async () => {
@@ -153,9 +186,7 @@ export const StreamManager: React.FC = () => {
         if (res.ok) {
           const data = await res.json();
           setAllLogFiles(Array.isArray(data) ? data : []);
-        } else {
-          setAllLogFiles([]);
-        }
+        } else setAllLogFiles([]);
       } catch {
         if (mounted) setAllLogFiles([]);
       }
@@ -168,157 +199,7 @@ export const StreamManager: React.FC = () => {
     };
   }, [API_BASE]);
 
-  useEffect(() => {
-    const t = setInterval(() => setCurrentTime(new Date()), 1000);
-    return () => clearInterval(t);
-  }, []);
-
-  const localStorageKeyFor = (username?: string) => `sm_saved_streams_v1_${username || "anon"}`;
-
-  const saveStreams = useCallback(
-    async (overrideStreams?: Stream[]) => {
-      const toSave = overrideStreams ?? streams;
-      const currentUsername = user?.username ?? getUser()?.username ?? undefined;
-
-      try {
-        const key = localStorageKeyFor(currentUsername && currentUsername.length > 0 ? currentUsername : undefined);
-        localStorage.setItem(key, JSON.stringify(toSave));
-      } catch {}
-
-      const token = getToken();
-      if (!token) return;
-      if (!initialFetchDoneRef.current && !overrideStreams) return;
-
-      try {
-        await fetch(`${API_BASE}/api/streams`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-          body: JSON.stringify(toSave),
-        });
-      } catch {}
-    },
-    [streams, user, API_BASE]
-  );
-
-  useEffect(() => {
-    void saveStreams();
-  }, [saveStreams]);
-
-  useEffect(() => {
-    const fetchStreams = async () => {
-      try {
-        const token = getToken();
-
-        if (token) {
-          try {
-            const res = await fetch(`${API_BASE}/api/streams`, { headers: { Authorization: `Bearer ${token}` } });
-            if (res.ok) {
-              const serverStreams = await res.json();
-              if (Array.isArray(serverStreams) && serverStreams.length > 0) {
-                setStreams(serverStreams);
-                setTimeout(() => serverStreams.forEach((s: Stream) => ensureStartAndFetchHistory(s)), 20);
-                return;
-              }
-            }
-          } catch {}
-        }
-
-        const currentUser = user || getUser();
-        const perUserKey = localStorageKeyFor(currentUser?.username);
-        const raw = currentUser?.username
-          ? localStorage.getItem(perUserKey)
-          : localStorage.getItem(perUserKey) || localStorage.getItem(localStorageKeyFor());
-
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            setStreams(parsed as Stream[]);
-            setTimeout(() => (parsed as Stream[]).forEach((s) => ensureStartAndFetchHistory(s)), 20);
-            return;
-          }
-        }
-
-        setStreams([]);
-      } finally {
-        initialFetchDoneRef.current = true;
-      }
-    };
-
-    void fetchStreams();
-  }, [API_BASE, user, ensureStartAndFetchHistory]);
-
-  useEffect(() => {
-    streams.forEach((s) => {
-      if (!startedStreamsRef.current.has(s.id)) {
-        ensureStartAndFetchHistory(s);
-      }
-    });
-  }, [streams, ensureStartAndFetchHistory]);
-
-  const handleBitrateUpdate = useCallback(
-    (streamId: string, bitrate: number | null) => {
-      const now = Date.now();
-      const twentyFourHoursAgo = now - 24 * 60 * 60 * 1000;
-
-      setAllBitrateHistory((prev) => {
-        const lastPoint = prev.length > 0 ? prev[prev.length - 1] : null;
-
-        const newPoint: AllBitrateDataPoint = { time: now };
-
-        streams.forEach((stream) => {
-          if (stream.id === streamId) {
-            newPoint[stream.id] = typeof bitrate === "number" ? bitrate : 0;
-          } else if (lastPoint && lastPoint[stream.id] !== undefined) {
-            newPoint[stream.id] = lastPoint[stream.id];
-          } else {
-            newPoint[stream.id] = 0;
-          }
-        });
-
-        return [...prev, newPoint].filter((p) => p.time >= twentyFourHoursAgo);
-      });
-    },
-    [streams]
-  );
-
-  useEffect(() => {
-    const token = getToken();
-    const eventsUrl = `${API_BASE.replace(/\/+$/, "")}/events${token ? `?token=${encodeURIComponent(token)}` : ""}`;
-    const evtSource = new EventSource(eventsUrl);
-
-    const handleEvent = (e: MessageEvent) => {
-      try {
-        const payload = JSON.parse(e.data);
-
-        if (payload.type === "bitrate") {
-          let targetStreamId = payload.streamId;
-          const serverUrl = payload.sourceUrl || payload.streamUrl || payload.source_url || null;
-          if (serverUrl) {
-            const normalized = normalizeUrl(serverUrl);
-            const match = streams.find((s) => normalizeUrl(s.url) === normalized);
-            if (match) targetStreamId = match.id;
-          }
-
-          const reported = typeof payload.bitrate === "number" ? payload.bitrate : 0;
-
-          handleBitrateUpdate(targetStreamId, reported);
-
-          setFailureCounts((prev) => {
-            const cur = prev[targetStreamId] || 0;
-            if (reported > 0) return { ...prev, [targetStreamId]: 0 };
-            return { ...prev, [targetStreamId]: cur + 1 };
-          });
-        }
-      } catch {}
-    };
-
-    evtSource.addEventListener("message", handleEvent);
-    return () => {
-      evtSource.removeEventListener("message", handleEvent);
-      evtSource.close();
-    };
-  }, [API_BASE, streams, handleBitrateUpdate]);
-
+  // ------------ Add stream -> INSERT in Supabase ------------
   const isValidStreamUrl = (url: string): boolean => {
     const lowerUrl = url.trim().toLowerCase();
     return (
@@ -331,7 +212,7 @@ export const StreamManager: React.FC = () => {
     );
   };
 
-  const addStream = () => {
+  const addStream = async () => {
     const urlToAdd = streamUrl.trim();
     if (!urlToAdd || !isValidStreamUrl(urlToAdd)) {
       toast({
@@ -343,62 +224,77 @@ export const StreamManager: React.FC = () => {
     }
 
     if (streams.length >= 12) {
-      toast({
-        title: "Limit Reached",
-        description: "You can add up to 12 streams",
-        variant: "destructive",
-      });
+      toast({ title: "Limit Reached", description: "You can add up to 12 streams", variant: "destructive" });
       return;
     }
 
     const normalized = normalizeUrl(urlToAdd);
     if (streams.some((s) => normalizeUrl(s.url) === normalized)) {
-      toast({
-        title: "Duplicate Stream",
-        description: "This stream URL is already added",
-        variant: "destructive",
-      });
+      toast({ title: "Duplicate Stream", description: "This stream URL is already added", variant: "destructive" });
       return;
     }
 
     const nameToAdd = streamName.trim() || `Stream ${streams.length + 1}`;
+    const color = streamColors[streams.length % streamColors.length];
 
-    const newStream: Stream = {
-      id: `stream-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      name: nameToAdd,
-      url: urlToAdd,
-      color: streamColors[streams.length % streamColors.length],
-      resolution,
+    const { data: authData } = await supabase.auth.getUser();
+    const authUser = authData?.user;
+    if (!authUser) {
+      toast({ title: "Not logged in", description: "Please login again.", variant: "destructive" });
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("streams")
+      .insert({
+        user_id: authUser.id,
+        name: nameToAdd,
+        url: urlToAdd,
+        resolution,
+        color,
+      })
+      .select("id, user_id, name, url, resolution, color")
+      .single();
+
+    if (error) {
+      toast({ title: "Failed to save stream", description: error.message, variant: "destructive" });
+      return;
+    }
+
+    const inserted: Stream = {
+      id: data.id,
+      name: data.name,
+      url: data.url,
+      resolution: data.resolution || resolution,
+      color: data.color || color,
     };
 
-    const next = [...streams, newStream];
-    setStreams(next);
-    setTimeout(() => ensureStartAndFetchHistory(newStream), 10);
-    void saveStreams(next);
+    setStreams((prev) => [...prev, inserted]);
+    setTimeout(() => ensureStartAndFetchHistory(inserted), 10);
 
     setStreamName("");
     setStreamUrl("");
 
-    toast({
-      title: "Stream Added",
-      description: `Stream added successfully (${next.length}/12)`,
-    });
+    toast({ title: "Stream Added", description: `Saved to database (${streams.length + 1}/12)` });
   };
 
+  // ------------ Remove stream -> DELETE in Supabase ------------
   const removeStream = useCallback(
-    (streamId: string) => {
-      setStreams((prev) => {
-        const next = prev.filter((s) => s.id !== streamId);
-        startedStreamsRef.current.delete(streamId);
-        void saveStreams(next);
-        return next;
-      });
+    async (streamId: string) => {
+      const { error } = await supabase.from("streams").delete().eq("id", streamId);
+      if (error) {
+        toast({ title: "Failed to delete stream", description: error.message, variant: "destructive" });
+        return;
+      }
+      setStreams((prev) => prev.filter((s) => s.id !== streamId));
+      startedStreamsRef.current.delete(streamId);
+      toast({ title: "Stream Removed" });
     },
-    [saveStreams]
+    [toast]
   );
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter") addStream();
+    if (e.key === "Enter") void addStream();
   };
 
   const gridClass =
@@ -426,79 +322,10 @@ export const StreamManager: React.FC = () => {
     for (const log of allLogFiles) {
       const stream = streams.find((s) => sanitizeFilename(s.name) === log.stream);
       const streamId = stream ? stream.id : log.stream;
-
-      items.push({
-        key: streamId,
-        label: `${log.file}`,
-        filename: log.file,
-      });
+      items.push({ key: streamId, label: `${log.file}`, filename: log.file });
     }
     return items;
   }, [allLogFiles, streams]);
-
-  const handleResolutionChange = (streamId: string, newResolution: string) => {
-    setStreams((prevStreams) => {
-      const newStreams = prevStreams.map((stream) =>
-        stream.id === streamId ? { ...stream, resolution: newResolution } : stream
-      );
-      return newStreams;
-    });
-  };
-
-  const saveListToFile = () => {
-    const listName = prompt("Enter a name for your stream list:");
-    if (!listName?.trim()) return;
-
-    const content =
-      `ListName:${listName.trim()}\n` + streams.map((s) => `${s.name};${s.url}`).join("\n");
-
-    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${listName.trim()}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
-  const loadListFromFile = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const text = e.target?.result as string;
-      if (!text) return;
-
-      const lines = text.split(/\r?\n/).filter(Boolean);
-      const streamLines = lines[0].startsWith("ListName:") ? lines.slice(1) : lines;
-
-      const newStreams = streamLines
-        .map((line, index) => {
-          const parts = line.split(";");
-          const name = parts.length === 2 ? parts[0].trim() : `Stream ${index + 1}`;
-          const url = parts.length === 2 ? parts[1].trim() : parts[0].trim();
-
-          return {
-            id: `${Date.now()}-${index}`,
-            name,
-            url,
-            color: streamColors[index % streamColors.length] || "#8884d8",
-            resolution: "480p",
-          } as Stream;
-        })
-        .filter((s) => s.url);
-
-      setStreams(newStreams);
-      void saveStreams(newStreams);
-      setTimeout(() => newStreams.forEach((s) => ensureStartAndFetchHistory(s)), 20);
-    };
-
-    reader.readAsText(file);
-    event.target.value = "";
-  };
 
   return (
     <div className="space-y-6 p-2">
@@ -562,45 +389,12 @@ export const StreamManager: React.FC = () => {
 
               <div className="flex flex-wrap items-center gap-2 mt-2">
                 <Button
-                  onClick={addStream}
+                  onClick={() => void addStream()}
                   disabled={streams.length >= 12}
                   className="bg-gradient-primary hover:shadow-glow transition-all"
                 >
                   <Plus className="h-4 w-4 mr-2" /> Add
                 </Button>
-
-                <Button onClick={saveListToFile} variant="outline" disabled={streams.length === 0}>
-                  <Save className="h-4 w-4 mr-2" /> Save List
-                </Button>
-
-                <label htmlFor="load-list-file" className="inline-block">
-                  <input
-                    id="load-list-file"
-                    type="file"
-                    accept=".txt"
-                    style={{ display: "none" }}
-                    onChange={loadListFromFile}
-                  />
-                  <Button asChild variant="outline">
-                    <span>Load File</span>
-                  </Button>
-                </label>
-
-                <div className="flex items-center ml-auto">
-                  <label htmlFor="grid-layout" className="mr-2 text-sm text-muted-foreground">
-                    Grid Layout:
-                  </label>
-                  <Select value={gridLayout} onValueChange={(v) => setGridLayout(v as any)}>
-                    <SelectTrigger className="w-[140px] bg-input border-stream-border">
-                      <SelectValue placeholder="Layout" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="3-2">3 columns</SelectItem>
-                      <SelectItem value="4-2">4 columns</SelectItem>
-                      <SelectItem value="6-2">6 columns</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
 
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
@@ -620,36 +414,27 @@ export const StreamManager: React.FC = () => {
                   </DropdownMenuContent>
                 </DropdownMenu>
 
-                {/* ✅ SHOW FOR ALL USERS */}
-                <Button
-                  variant="outline"
-                  size="icon"
-                  title="User Management"
-                  onClick={() => setManagementOpen(true)}
-                >
+                <Button variant="outline" size="icon" title="User Management" onClick={() => setManagementOpen(true)}>
                   <Settings className="h-4 w-4" />
                 </Button>
 
-                {user && (
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    title="Logout"
-                    onClick={async () => {
-                      await logout();
-                      window.location.href = "/login";
-                    }}
-                  >
-                    <LogOut className="h-4 w-4" />
-                  </Button>
-                )}
+                <Button
+                  variant="outline"
+                  size="icon"
+                  title="Logout"
+                  onClick={async () => {
+                    await logout();
+                    window.location.href = "/login";
+                  }}
+                >
+                  <LogOut className="h-4 w-4" />
+                </Button>
               </div>
             </CardContent>
           </Card>
         </div>
       </div>
 
-      {/* ✅ Dialog available for all users */}
       <ManagementDialog isOpen={isManagementOpen} onClose={() => setManagementOpen(false)} />
 
       <div className="lg:col-span-3">
@@ -671,7 +456,9 @@ export const StreamManager: React.FC = () => {
                   <Button
                     variant="destructive"
                     size="sm"
-                    onClick={() => setReloadSignals((rs) => ({ ...rs, [stream.id]: (rs[stream.id] || 0) + 1 }))}
+                    onClick={() =>
+                      setReloadSignals((rs) => ({ ...rs, [stream.id]: (rs[stream.id] || 0) + 1 }))
+                    }
                   >
                     <RotateCcw className="h-4 w-4" />
                   </Button>
@@ -682,10 +469,9 @@ export const StreamManager: React.FC = () => {
                   streamName={stream.name}
                   streamUrl={stream.url}
                   resolution={stream.resolution}
-                  onResolutionChange={handleResolutionChange}
-                  onRemove={() => removeStream(stream.id)}
+                  onResolutionChange={() => {}}
+                  onRemove={() => void removeStream(stream.id)}
                   reloadSignal={reloadSignals[stream.id] || 0}
-                  onBitrateUpdate={handleBitrateUpdate}
                   canRemove={true}
                   status={(failureCounts[stream.id] || 0) === 0 ? "online" : "offline"}
                 />
@@ -723,13 +509,7 @@ export const StreamManager: React.FC = () => {
 
           <Card className="bg-gradient-card border-stream-border">
             <CardContent className="pt-2">
-              <React.Suspense
-                fallback={
-                  <div style={{ height: 600, display: "flex", alignItems: "center", justifyContent: "center", color: "#aaa" }}>
-                    Loading chart…
-                  </div>
-                }
-              >
+              <React.Suspense fallback={<div style={{ height: 600, display: "flex", alignItems: "center", justifyContent: "center", color: "#aaa" }}>Loading chart…</div>}>
                 <AllBitrateGraph
                   data={allBitrateHistory}
                   streams={selectedGraphStream === "all" ? streams : streams.filter((s) => s.id === selectedGraphStream)}
