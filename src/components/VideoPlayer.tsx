@@ -84,8 +84,12 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(true);
   const [hasError, setHasError] = useState(false);
+  const [errorText, setErrorText] = useState<string>("");
   const [isLoading, setIsLoading] = useState(true);
-  const [isVisible, setIsVisible] = useState(false);
+
+  // IMPORTANT CHANGE: default TRUE so we start immediately (no waiting)
+  const [isVisible, setIsVisible] = useState(true);
+
   const [computedStatus, setComputedStatus] = useState<"online" | "offline">("online");
   const [proxiedHlsUrl, setProxiedHlsUrl] = useState<string | null>(null);
   const [measuredBitrate, setMeasuredBitrate] = useState<number | null>(null);
@@ -114,6 +118,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     (msg?: string) => {
       setHasError(true);
       setIsLoading(false);
+      setErrorText(msg || "Failed to load stream");
       if (msg) console.error(`[${streamId}] ${msg}`);
     },
     [streamId]
@@ -161,6 +166,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
 
     setIsLoading(true);
     setHasError(false);
+    setErrorText("");
     fragLoadedRef.current = false;
 
     if (manifestWatchRef.current) clearTimeout(manifestWatchRef.current);
@@ -192,7 +198,9 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
         }
 
         const hlsAbs =
-          parsed?.hlsAbsUrl || parsed?.hlsUrl || (typeof dataRaw === "string" && dataRaw.trim());
+          parsed?.hlsAbsUrl ||
+          parsed?.hlsUrl ||
+          (typeof dataRaw === "string" && dataRaw.trim());
 
         if (hlsAbs) {
           finalStreamUrl = hlsAbs.startsWith("/") ? `${HLS_BASE}${hlsAbs}` : hlsAbs;
@@ -214,12 +222,28 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     if (manifestWatchRef.current) clearTimeout(manifestWatchRef.current);
     manifestWatchRef.current = setTimeout(() => {
       if (!fragLoadedRef.current) {
-        handleError("No HLS fragments received (timeout)");
+        handleError("No HLS fragments received (timeout). Likely CORS/403/blocked segments.");
       }
     }, 12_000);
 
+    // Capture HTML video errors too
+    const onVideoError = () => {
+      const code = video.error?.code;
+      const msg =
+        code === 1 ? "MEDIA_ERR_ABORTED" :
+        code === 2 ? "MEDIA_ERR_NETWORK (network/CORS/blocked)" :
+        code === 3 ? "MEDIA_ERR_DECODE (codec unsupported)" :
+        code === 4 ? "MEDIA_ERR_SRC_NOT_SUPPORTED" :
+        "Unknown video error";
+      handleError(`Video element error: ${msg}`);
+    };
+    video.addEventListener("error", onVideoError, { once: true });
+
     if (Hls.isSupported()) {
-      const hls = new Hls({ enableWorker: true, lowLatencyMode: false });
+      const hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: false,
+      });
       hlsRef.current = hls;
 
       hls.on(Hls.Events.FRAG_LOADED, (_e, data) => {
@@ -235,10 +259,20 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
         }
       });
 
+      // IMPORTANT CHANGE: show real details (manifestLoadError / fragLoadError / HTTP codes)
       hls.on(Hls.Events.ERROR, (_event, data) => {
+        const details = data?.details || "unknown";
+        const type = data?.type || "unknown";
+        const fatal = data?.fatal ? "fatal" : "non-fatal";
+        const resp: any = (data as any)?.response;
+        const statusCode = resp?.code ? `HTTP ${resp.code}` : "";
+        const url = resp?.url ? `URL: ${resp.url}` : "";
+        const reason = (data as any)?.error?.message ? `Reason: ${(data as any).error.message}` : "";
+
+        console.error("HLS ERROR", data);
+
         if (data.fatal) {
-          console.error("HLS fatal error", data);
-          handleError(`HLS Error: ${data.details}`);
+          handleError(`HLS ${fatal}: ${type} / ${details} ${statusCode} ${url} ${reason}`.trim());
         }
       });
 
@@ -306,6 +340,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     const timer = setTimeout(() => {
       retryCountRef.current += 1;
       setHasError(false);
+      setErrorText("");
       initializeStream();
     }, 2500);
 
@@ -324,7 +359,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     else setComputedStatus("offline");
   }, [status, measuredBitrate]);
 
-  // Visibility observer
+  // Visibility observer (kept, but does NOT block startup anymore)
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -338,22 +373,10 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     return () => observer.disconnect();
   }, []);
 
-  // Start when visible
+  // Start immediately on mount + whenever streamUrl changes/reloadKey changes
   useEffect(() => {
-    if (!isVisible) return;
-
-    if (teardownTimerRef.current) {
-      clearTimeout(teardownTimerRef.current);
-      teardownTimerRef.current = null;
-    }
-
-    if (!hlsRef.current) initializeStream();
-  }, [isVisible, initializeStream]);
-
-  // Reload / unmount cleanup
-  useEffect(() => {
-    const savedMuted = localStorage.getItem("videoMuted") === "true";
-    setIsMuted(savedMuted);
+    retryCountRef.current = 0;
+    initializeStream();
 
     return () => {
       teardownPlayer();
@@ -361,7 +384,13 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
       if (teardownTimerRef.current) clearTimeout(teardownTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reloadKey]);
+  }, [reloadKey, streamUrl]);
+
+  // Handle muted preference
+  useEffect(() => {
+    const savedMuted = localStorage.getItem("videoMuted") === "true";
+    setIsMuted(savedMuted);
+  }, []);
 
   const togglePlay = () => {
     const video = videoRef.current;
@@ -453,10 +482,15 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
         )}
 
         {hasError && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-stream-bg text-destructive">
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-stream-bg text-destructive p-3 text-center">
             <AlertCircle className="h-8 w-8 mb-2" />
-            <p className="text-sm mb-4">Failed to load stream</p>
-            <Button onClick={initializeStream} variant="outline" size="sm">
+            <p className="text-sm font-semibold">Failed to load stream</p>
+            {errorText && (
+              <p className="text-xs mt-2 break-words max-w-[95%] opacity-90">
+                {errorText}
+              </p>
+            )}
+            <Button onClick={initializeStream} variant="outline" size="sm" className="mt-3">
               <RefreshCcw className="h-4 w-4 mr-2" />
               Retry
             </Button>
@@ -509,11 +543,9 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
         )}
 
         <div className="p-3 bg-stream-bg border-t border-stream-border">
-          <div className="flex items-center justify-between">
-            <div className="min-w-0">
-              <p className="text-sm font-semibold truncate">{streamName}</p>
-              <p className="text-xs text-muted-foreground font-mono truncate">{streamUrl}</p>
-            </div>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold truncate">{streamName}</p>
+            <p className="text-xs text-muted-foreground font-mono truncate">{streamUrl}</p>
           </div>
         </div>
       </div>
