@@ -3,8 +3,6 @@ import { VideoPlayer } from "./VideoPlayer";
 import { RotateCcw, Plus, Monitor, History, Save, LogOut, Settings } from "lucide-react";
 import {
   Card,
-  CardHeader,
-  CardTitle,
   CardContent,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -27,9 +25,6 @@ import {
 
 import { getUser, logout, UserPayload, getToken } from "@/lib/auth";
 import ManagementDialog from "./ManagementDialog";
-
-// ✅ Correct Supabase import (fix for your build error)
-import { supabase } from "@/integrations/supabase/client";
 
 const streamColors = [
   "#8884d8", "#82ca9d", "#ffc658", "#ff7300", "#387908", "#ff0000",
@@ -56,7 +51,6 @@ export const StreamManager: React.FC = () => {
 
   const { toast } = useToast();
 
-  // Helper to get authorization headers for API calls
   const getAuthHeaders = useCallback(() => {
     const token = getToken();
     return {
@@ -79,69 +73,19 @@ export const StreamManager: React.FC = () => {
 
   const [user, setUser] = useState<UserPayload | null>(null);
 
-  // ✅ Admin menu state
+  // ✅ show management menu for all users
   const [isManagementOpen, setManagementOpen] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(false);
 
   const startedStreamsRef = useRef<Set<string>>(new Set());
   const initialFetchDoneRef = useRef(false);
 
   const sanitizeFilename = (name: string) => String(name || "").replace(/[<>:"/\\|?*]/g, "_");
-
   const normalizeUrl = (url: string) => url.trim().toLowerCase().replace(/\/$/, "");
 
-  // ===== Admin role check from Supabase profiles =====
   useEffect(() => {
-    const checkAdmin = async () => {
-      try {
-        const { data: { user: sbUser } } = await supabase.auth.getUser();
-        if (!sbUser) {
-          setIsAdmin(false);
-          return;
-        }
-
-        const { data, error } = await supabase
-          .from("profiles")
-          .select("role")
-          .eq("id", sbUser.id)
-          .maybeSingle();
-
-        if (error) {
-          console.warn("Failed to read profiles.role", error);
-          setIsAdmin(false);
-          return;
-        }
-
-        setIsAdmin((data?.role || "user") === "admin");
-      } catch (e) {
-        console.warn("checkAdmin failed", e);
-        setIsAdmin(false);
-      }
-    };
-
-    void checkAdmin();
+    setUser(getUser());
   }, []);
 
-  // Load user payload from your auth helper (keeps existing behavior)
-  useEffect(() => {
-    const currentUser = getUser();
-    // if your old token says admin, keep it
-    if (currentUser?.role === "admin") {
-      const adminRoles = new Proxy(
-        {},
-        {
-          get: function () {
-            return true;
-          },
-        }
-      );
-      setUser({ ...currentUser, roles: adminRoles });
-    } else {
-      setUser(currentUser);
-    }
-  }, []);
-
-  // ===== Helpers for history merge =====
   const pointsForStream = useCallback(
     (hist: Array<{ time: number; bitrate: number | null; estimated?: boolean }>, streamId: string) => {
       return hist.map((h) => {
@@ -154,28 +98,6 @@ export const StreamManager: React.FC = () => {
     []
   );
 
-  const mergeHistoryToPoints = useCallback(
-    (hist: Array<{ time: number; bitrate: number | null; estimated?: boolean }>, streamId: string) => {
-      return hist.map((h) => {
-        const item: AllBitrateDataPoint = { time: h.time } as AllBitrateDataPoint;
-
-        streams.forEach((s) => {
-          if (s.id === streamId) {
-            item[s.id] = typeof h.bitrate === "number" ? h.bitrate : 0;
-            (item as Record<string, number | null | boolean>)[`${s.id}__est`] = !!h.estimated;
-          } else {
-            item[s.id] = 0;
-            (item as Record<string, number | null | boolean>)[`${s.id}__est`] = false;
-          }
-        });
-
-        return item;
-      });
-    },
-    [streams]
-  );
-
-  // ===== Ensure server start + history =====
   const ensureStartAndFetchHistory = useCallback(
     async (stream: Stream) => {
       try {
@@ -222,27 +144,22 @@ export const StreamManager: React.FC = () => {
     [API_BASE, getAuthHeaders, pointsForStream]
   );
 
-  // ===== Fetch all log files =====
   useEffect(() => {
     let mounted = true;
-
     const fetchLogs = async () => {
       try {
         const res = await fetch(`${API_BASE}/api/logs/all-files`);
         if (!mounted) return;
         if (res.ok) {
           const data = await res.json();
-          if (Array.isArray(data)) {
-            setAllLogFiles(data);
-            return;
-          }
+          setAllLogFiles(Array.isArray(data) ? data : []);
+        } else {
+          setAllLogFiles([]);
         }
-        setAllLogFiles([]);
       } catch {
         if (mounted) setAllLogFiles([]);
       }
     };
-
     fetchLogs();
     const id = setInterval(fetchLogs, 10_000);
     return () => {
@@ -251,29 +168,23 @@ export const StreamManager: React.FC = () => {
     };
   }, [API_BASE]);
 
-  // ===== Clock =====
   useEffect(() => {
     const t = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(t);
   }, []);
 
-  // ===== Auth / Persistence helpers =====
   const localStorageKeyFor = (username?: string) => `sm_saved_streams_v1_${username || "anon"}`;
 
   const saveStreams = useCallback(
     async (overrideStreams?: Stream[]) => {
       const toSave = overrideStreams ?? streams;
-
-      let currentUsername = user?.username ?? getUser()?.username ?? undefined;
+      const currentUsername = user?.username ?? getUser()?.username ?? undefined;
 
       try {
         const key = localStorageKeyFor(currentUsername && currentUsername.length > 0 ? currentUsername : undefined);
         localStorage.setItem(key, JSON.stringify(toSave));
-      } catch {
-        // ignore
-      }
+      } catch {}
 
-      // if no token or initial fetch not done, skip server save
       const token = getToken();
       if (!token) return;
       if (!initialFetchDoneRef.current && !overrideStreams) return;
@@ -281,15 +192,10 @@ export const StreamManager: React.FC = () => {
       try {
         await fetch(`${API_BASE}/api/streams`, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
           body: JSON.stringify(toSave),
         });
-      } catch (e) {
-        console.debug("Failed to save streams to server", e);
-      }
+      } catch {}
     },
     [streams, user, API_BASE]
   );
@@ -298,18 +204,14 @@ export const StreamManager: React.FC = () => {
     void saveStreams();
   }, [saveStreams]);
 
-  // ===== Fetch streams on mount =====
   useEffect(() => {
     const fetchStreams = async () => {
       try {
         const token = getToken();
 
         if (token) {
-          // try saved streams
           try {
-            const res = await fetch(`${API_BASE}/api/streams`, {
-              headers: { Authorization: `Bearer ${token}` },
-            });
+            const res = await fetch(`${API_BASE}/api/streams`, { headers: { Authorization: `Bearer ${token}` } });
             if (res.ok) {
               const serverStreams = await res.json();
               if (Array.isArray(serverStreams) && serverStreams.length > 0) {
@@ -318,63 +220,33 @@ export const StreamManager: React.FC = () => {
                 return;
               }
             }
-          } catch {
-            // ignore
-          }
+          } catch {}
+        }
 
-          // fallback active streams
-          try {
-            const resActive = await fetch(`${API_BASE}/api/active-streams`, { headers: getAuthHeaders() });
-            if (resActive.ok) {
-              const active = await resActive.json();
-              if (Array.isArray(active) && active.length > 0) {
-                const mapped: Stream[] = active.map((a: any, idx: number) => ({
-                  id: a.streamId || `server-${idx}`,
-                  name: a.streamName || a.streamId || `Stream ${idx + 1}`,
-                  url: a.sourceUrl || a.streamUrl || a.hlsUrl || "",
-                  color: streamColors[idx % streamColors.length],
-                  resolution: a.resolution || "480p",
-                }));
-                setStreams(mapped);
-                setTimeout(() => mapped.forEach((s) => ensureStartAndFetchHistory(s)), 20);
-                return;
-              }
-            }
-          } catch {
-            // ignore
+        const currentUser = user || getUser();
+        const perUserKey = localStorageKeyFor(currentUser?.username);
+        const raw = currentUser?.username
+          ? localStorage.getItem(perUserKey)
+          : localStorage.getItem(perUserKey) || localStorage.getItem(localStorageKeyFor());
+
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setStreams(parsed as Stream[]);
+            setTimeout(() => (parsed as Stream[]).forEach((s) => ensureStartAndFetchHistory(s)), 20);
+            return;
           }
         }
 
-        // local fallback
-        try {
-          const currentUser = user || getUser();
-          const perUserKey = localStorageKeyFor(currentUser?.username);
-          const raw = currentUser?.username
-            ? localStorage.getItem(perUserKey)
-            : localStorage.getItem(perUserKey) || localStorage.getItem(localStorageKeyFor());
-
-          if (raw) {
-            const parsed = JSON.parse(raw);
-            if (Array.isArray(parsed) && parsed.length > 0) {
-              setStreams(parsed as Stream[]);
-              setTimeout(() => (parsed as Stream[]).forEach((s) => ensureStartAndFetchHistory(s)), 20);
-              return;
-            }
-          }
-
-          setStreams([]);
-        } catch {
-          setStreams([]);
-        }
+        setStreams([]);
       } finally {
         initialFetchDoneRef.current = true;
       }
     };
 
     void fetchStreams();
-  }, [API_BASE, user, ensureStartAndFetchHistory, getAuthHeaders]);
+  }, [API_BASE, user, ensureStartAndFetchHistory]);
 
-  // ===== Ensure start streams =====
   useEffect(() => {
     streams.forEach((s) => {
       if (!startedStreamsRef.current.has(s.id)) {
@@ -383,7 +255,6 @@ export const StreamManager: React.FC = () => {
     });
   }, [streams, ensureStartAndFetchHistory]);
 
-  // ===== Bitrate update =====
   const handleBitrateUpdate = useCallback(
     (streamId: string, bitrate: number | null) => {
       const now = Date.now();
@@ -397,7 +268,6 @@ export const StreamManager: React.FC = () => {
         streams.forEach((stream) => {
           if (stream.id === streamId) {
             newPoint[stream.id] = typeof bitrate === "number" ? bitrate : 0;
-            (newPoint as any)[`${stream.id}__est`] = false;
           } else if (lastPoint && lastPoint[stream.id] !== undefined) {
             newPoint[stream.id] = lastPoint[stream.id];
           } else {
@@ -405,14 +275,12 @@ export const StreamManager: React.FC = () => {
           }
         });
 
-        const newHistory = [...prev, newPoint];
-        return newHistory.filter((p) => p.time >= twentyFourHoursAgo);
+        return [...prev, newPoint].filter((p) => p.time >= twentyFourHoursAgo);
       });
     },
     [streams]
   );
 
-  // ===== SSE updates =====
   useEffect(() => {
     const token = getToken();
     const eventsUrl = `${API_BASE.replace(/\/+$/, "")}/events${token ? `?token=${encodeURIComponent(token)}` : ""}`;
@@ -440,46 +308,27 @@ export const StreamManager: React.FC = () => {
             if (reported > 0) return { ...prev, [targetStreamId]: 0 };
             return { ...prev, [targetStreamId]: cur + 1 };
           });
-        } else if (payload.type === "started") {
-          let targetStreamId = payload.streamId;
-          const serverUrl = payload.sourceUrl || payload.streamUrl || payload.source_url || null;
-          if (serverUrl) {
-            const normalized = normalizeUrl(serverUrl);
-            const match = streams.find((s) => normalizeUrl(s.url) === normalized);
-            if (match) targetStreamId = match.id;
-          }
-          setReloadSignals((rs) => ({ ...rs, [targetStreamId]: (rs[targetStreamId] || 0) + 1 }));
-          setFailureCounts((prev) => ({ ...prev, [targetStreamId]: 0 }));
         }
-      } catch (err) {
-        console.debug("SSE parse error", err);
-      }
+      } catch {}
     };
 
     evtSource.addEventListener("message", handleEvent);
-    evtSource.addEventListener("error", (err) => console.debug("SSE error", err));
-
     return () => {
       evtSource.removeEventListener("message", handleEvent);
       evtSource.close();
     };
   }, [API_BASE, streams, handleBitrateUpdate]);
 
-  // ===== URL validation =====
   const isValidStreamUrl = (url: string): boolean => {
-    try {
-      const lowerUrl = url.trim().toLowerCase();
-      return (
-        lowerUrl.startsWith("http://") ||
-        lowerUrl.startsWith("https://") ||
-        lowerUrl.startsWith("rtmp://") ||
-        lowerUrl.startsWith("rtsp://") ||
-        lowerUrl.startsWith("udp://") ||
-        lowerUrl.includes(".m3u8")
-      );
-    } catch {
-      return false;
-    }
+    const lowerUrl = url.trim().toLowerCase();
+    return (
+      lowerUrl.startsWith("http://") ||
+      lowerUrl.startsWith("https://") ||
+      lowerUrl.startsWith("rtmp://") ||
+      lowerUrl.startsWith("rtsp://") ||
+      lowerUrl.startsWith("udp://") ||
+      lowerUrl.includes(".m3u8")
+    );
   };
 
   const addStream = () => {
@@ -540,16 +389,6 @@ export const StreamManager: React.FC = () => {
     (streamId: string) => {
       setStreams((prev) => {
         const next = prev.filter((s) => s.id !== streamId);
-
-        setAllBitrateHistory((prevHist) => {
-          const newHistory = prevHist.map((point) => {
-            const newPoint = { ...point };
-            delete (newPoint as any)[streamId];
-            return newPoint;
-          });
-          return newHistory.filter((point) => Object.keys(point).length > 1);
-        });
-
         startedStreamsRef.current.delete(streamId);
         void saveStreams(next);
         return next;
@@ -572,9 +411,8 @@ export const StreamManager: React.FC = () => {
       : "grid-cols-1 sm:grid-cols-2 xl:grid-cols-4";
 
   const latestTotalBitrate = useMemo(() => {
-    if (!allBitrateHistory || allBitrateHistory.length === 0) return 0;
+    if (!allBitrateHistory.length) return 0;
     const latest = allBitrateHistory[allBitrateHistory.length - 1];
-    if (!latest) return 0;
     let total = 0;
     streams.forEach((s) => {
       const v = latest[s.id];
@@ -585,7 +423,6 @@ export const StreamManager: React.FC = () => {
 
   const downloadItems = useMemo(() => {
     const items: { key: string; label: string; filename: string }[] = [];
-
     for (const log of allLogFiles) {
       const stream = streams.find((s) => sanitizeFilename(s.name) === log.stream);
       const streamId = stream ? stream.id : log.stream;
@@ -596,74 +433,34 @@ export const StreamManager: React.FC = () => {
         filename: log.file,
       });
     }
-
-    // If not admin, limit to active streams
-    if (!isAdmin && user?.role !== "admin") {
-      const currentStreamIds = new Set(streams.map((s) => s.id));
-      return items.filter((it) => currentStreamIds.has(it.key));
-    }
-
     return items;
-  }, [allLogFiles, streams, user, isAdmin]);
+  }, [allLogFiles, streams]);
 
   const handleResolutionChange = (streamId: string, newResolution: string) => {
     setStreams((prevStreams) => {
       const newStreams = prevStreams.map((stream) =>
         stream.id === streamId ? { ...stream, resolution: newResolution } : stream
       );
-
-      const streamToRestart = newStreams.find((s) => s.id === streamId);
-      if (streamToRestart) {
-        fetch(`${API_BASE}/restart-stream`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            streamUrl: streamToRestart.url,
-            streamName: streamToRestart.name,
-            resolution: newResolution,
-          }),
-        }).then((res) => {
-          if (res.ok) {
-            toast({
-              title: "Resolution Changed",
-              description: `Stream ${streamToRestart.name} is restarting with ${newResolution}.`,
-            });
-          } else {
-            toast({
-              title: "Error",
-              description: "Failed to change resolution.",
-              variant: "destructive",
-            });
-          }
-        });
-      }
-
       return newStreams;
     });
   };
 
-  // ===== Save/Load file =====
   const saveListToFile = () => {
     const listName = prompt("Enter a name for your stream list:");
-    if (listName && listName.trim() !== "") {
-      const content =
-        `ListName:${listName.trim()}\n` + streams.map((s) => `${s.name};${s.url}`).join("\n");
+    if (!listName?.trim()) return;
 
-      const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${listName.trim()}.txt`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+    const content =
+      `ListName:${listName.trim()}\n` + streams.map((s) => `${s.name};${s.url}`).join("\n");
 
-      toast({
-        title: "List Saved to File",
-        description: `Stream list '${listName.trim()}' saved successfully.`,
-      });
-    }
+    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${listName.trim()}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   const loadListFromFile = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -676,11 +473,7 @@ export const StreamManager: React.FC = () => {
       if (!text) return;
 
       const lines = text.split(/\r?\n/).filter(Boolean);
-      let streamLines = lines;
-
-      if (lines[0].startsWith("ListName:")) {
-        streamLines = lines.slice(1);
-      }
+      const streamLines = lines[0].startsWith("ListName:") ? lines.slice(1) : lines;
 
       const newStreams = streamLines
         .map((line, index) => {
@@ -693,7 +486,7 @@ export const StreamManager: React.FC = () => {
             name,
             url,
             color: streamColors[index % streamColors.length] || "#8884d8",
-            resolution: "",
+            resolution: "480p",
           } as Stream;
         })
         .filter((s) => s.url);
@@ -701,11 +494,6 @@ export const StreamManager: React.FC = () => {
       setStreams(newStreams);
       void saveStreams(newStreams);
       setTimeout(() => newStreams.forEach((s) => ensureStartAndFetchHistory(s)), 20);
-
-      toast({
-        title: "List Loaded from File",
-        description: `Loaded ${newStreams.length} stream(s) from file.`,
-      });
     };
 
     reader.readAsText(file);
@@ -773,36 +561,30 @@ export const StreamManager: React.FC = () => {
               </div>
 
               <div className="flex flex-wrap items-center gap-2 mt-2">
-                {(!user || user.roles.add_streams) && (
-                  <Button
-                    onClick={addStream}
-                    disabled={streams.length >= 12}
-                    className="bg-gradient-primary hover:shadow-glow transition-all"
-                  >
-                    <Plus className="h-4 w-4 mr-2" /> Add
-                  </Button>
-                )}
+                <Button
+                  onClick={addStream}
+                  disabled={streams.length >= 12}
+                  className="bg-gradient-primary hover:shadow-glow transition-all"
+                >
+                  <Plus className="h-4 w-4 mr-2" /> Add
+                </Button>
 
-                {(!user || user.roles.save_lists) && (
-                  <Button onClick={saveListToFile} variant="outline" disabled={streams.length === 0}>
-                    <Save className="h-4 w-4 mr-2" /> Save List
-                  </Button>
-                )}
+                <Button onClick={saveListToFile} variant="outline" disabled={streams.length === 0}>
+                  <Save className="h-4 w-4 mr-2" /> Save List
+                </Button>
 
-                {(!user || user.roles.load_lists) && (
-                  <label htmlFor="load-list-file" className="inline-block">
-                    <input
-                      id="load-list-file"
-                      type="file"
-                      accept=".txt"
-                      style={{ display: "none" }}
-                      onChange={loadListFromFile}
-                    />
-                    <Button asChild variant="outline">
-                      <span>Load File</span>
-                    </Button>
-                  </label>
-                )}
+                <label htmlFor="load-list-file" className="inline-block">
+                  <input
+                    id="load-list-file"
+                    type="file"
+                    accept=".txt"
+                    style={{ display: "none" }}
+                    onChange={loadListFromFile}
+                  />
+                  <Button asChild variant="outline">
+                    <span>Load File</span>
+                  </Button>
+                </label>
 
                 <div className="flex items-center ml-auto">
                   <label htmlFor="grid-layout" className="mr-2 text-sm text-muted-foreground">
@@ -820,39 +602,33 @@ export const StreamManager: React.FC = () => {
                   </Select>
                 </div>
 
-                {(!user || user.roles.download_logs) && (
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="outline" disabled={downloadItems.length === 0}>
-                        <History className="h-4 w-4 mr-2" /> Download Logs
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      {downloadItems.map((it) => (
-                        <DropdownMenuItem
-                          key={`${it.key}-${it.filename}`}
-                          onSelect={() => {
-                            window.open(`${API_BASE}/download-log/${it.key}/${it.filename}`, "_blank");
-                          }}
-                        >
-                          {it.label}
-                        </DropdownMenuItem>
-                      ))}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                )}
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline" disabled={downloadItems.length === 0}>
+                      <History className="h-4 w-4 mr-2" /> Download Logs
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    {downloadItems.map((it) => (
+                      <DropdownMenuItem
+                        key={`${it.key}-${it.filename}`}
+                        onSelect={() => window.open(`${API_BASE}/download-log/${it.key}/${it.filename}`, "_blank")}
+                      >
+                        {it.label}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
 
-                {/* ✅ Admin Settings menu button */}
-                {(isAdmin || user?.role === "admin") && (
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    title="User Management"
-                    onClick={() => setManagementOpen(true)}
-                  >
-                    <Settings className="h-4 w-4" />
-                  </Button>
-                )}
+                {/* ✅ SHOW FOR ALL USERS */}
+                <Button
+                  variant="outline"
+                  size="icon"
+                  title="User Management"
+                  onClick={() => setManagementOpen(true)}
+                >
+                  <Settings className="h-4 w-4" />
+                </Button>
 
                 {user && (
                   <Button
@@ -861,7 +637,6 @@ export const StreamManager: React.FC = () => {
                     title="Logout"
                     onClick={async () => {
                       await logout();
-                      setUser(null);
                       window.location.href = "/login";
                     }}
                   >
@@ -874,7 +649,7 @@ export const StreamManager: React.FC = () => {
         </div>
       </div>
 
-      {/* ✅ Management dialog rendered in StreamManager */}
+      {/* ✅ Dialog available for all users */}
       <ManagementDialog isOpen={isManagementOpen} onClose={() => setManagementOpen(false)} />
 
       <div className="lg:col-span-3">
@@ -896,27 +671,7 @@ export const StreamManager: React.FC = () => {
                   <Button
                     variant="destructive"
                     size="sm"
-                    onClick={async () => {
-                      try {
-                        const body = { streamUrl: stream.url, streamName: stream.name, resolution: stream.resolution };
-                        const res = await fetch(`${API_BASE}/restart-stream`, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify(body),
-                        });
-
-                        if (!res.ok) {
-                          const txt = await res.text().catch(() => "restart failed");
-                          toast({ title: "Restart Failed", description: txt, variant: "destructive" });
-                        } else {
-                          setReloadSignals((rs) => ({ ...rs, [stream.id]: (rs[stream.id] || 0) + 1 }));
-                          setFailureCounts((fc) => ({ ...fc, [stream.id]: 0 }));
-                          toast({ title: "Restarted", description: `Restart requested for ${stream.name}` });
-                        }
-                      } catch (err) {
-                        toast({ title: "Restart Error", description: String(err), variant: "destructive" });
-                      }
-                    }}
+                    onClick={() => setReloadSignals((rs) => ({ ...rs, [stream.id]: (rs[stream.id] || 0) + 1 }))}
                   >
                     <RotateCcw className="h-4 w-4" />
                   </Button>
@@ -928,15 +683,10 @@ export const StreamManager: React.FC = () => {
                   streamUrl={stream.url}
                   resolution={stream.resolution}
                   onResolutionChange={handleResolutionChange}
-                  onRemove={async () => {
-                    const confirmed = window.confirm(`Are you sure you want to remove the stream "${stream.name}"?`);
-                    if (!confirmed) return;
-                    removeStream(stream.id);
-                    toast({ title: "Stream Removed", description: `${stream.name} has been removed.` });
-                  }}
+                  onRemove={() => removeStream(stream.id)}
                   reloadSignal={reloadSignals[stream.id] || 0}
                   onBitrateUpdate={handleBitrateUpdate}
-                  canRemove={!user || user.roles.delete_streams}
+                  canRemove={true}
                   status={(failureCounts[stream.id] || 0) === 0 ? "online" : "offline"}
                 />
               </div>
