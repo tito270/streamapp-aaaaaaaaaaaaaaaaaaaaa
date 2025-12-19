@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, useCallback } from "react";
 import {
   Dialog,
   DialogContent,
@@ -10,78 +10,42 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/use-toast";
 import { Switch } from "@/components/ui/switch";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import { supabase } from "@/integrations/supabase/client";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 interface ManagementDialogProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
-type DbProfile = {
-  id: string; // uuid
-  username: string | null;
-  role: string | null; // 'admin' | 'user' ...
-  roles: Record<string, boolean> | null; // jsonb
+type DbStreamRow = {
+  id: string;
+  user_id: string;
+  name: string;
+  url: string;
+  resolution: string | null;
+  color: string | null;
 };
 
-const allRoles = [
-  "add_streams",
-  "save_lists",
-  "load_lists",
-  "download_logs",
-  "delete_streams",
-] as const;
-
-type RoleKey = (typeof allRoles)[number];
-
-const roleMeta: Record<
-  RoleKey,
-  { label: string; description: string; group: "Streams" | "Lists" | "Logs" }
-> = {
-  add_streams: {
-    label: "Add streams",
-    description: "Allow creating/adding streams to monitoring.",
-    group: "Streams",
-  },
-  delete_streams: {
-    label: "Delete streams",
-    description: "Allow removing streams from monitoring.",
-    group: "Streams",
-  },
-  save_lists: {
-    label: "Save lists",
-    description: "Allow saving stream lists/presets.",
-    group: "Lists",
-  },
-  load_lists: {
-    label: "Load lists",
-    description: "Allow loading saved stream lists/presets.",
-    group: "Lists",
-  },
-  download_logs: {
-    label: "Download logs",
-    description: "Allow downloading/exporting logs and reports.",
-    group: "Logs",
-  },
+type StreamRow = {
+  id: string;
+  name: string;
+  url: string;
+  resolution: string;
+  user_id: string;
 };
 
 function getInitialTheme(): "light" | "dark" {
   try {
     const saved = localStorage.getItem("theme");
     if (saved === "dark" || saved === "light") return saved;
-  } catch {
-    // ignore
-  }
+  } catch {}
   return "light";
 }
 
@@ -91,336 +55,213 @@ function applyTheme(theme: "light" | "dark") {
   else root.classList.remove("dark");
   try {
     localStorage.setItem("theme", theme);
-  } catch {
-    // ignore
-  }
+  } catch {}
 }
 
-function makeRandomPassword(len = 12) {
-  const chars =
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%";
-  const arr = new Uint8Array(len);
-  if (typeof crypto !== "undefined" && crypto.getRandomValues) {
-    crypto.getRandomValues(arr);
-    return Array.from(arr)
-      .map((n) => chars.charAt(n % chars.length))
-      .join("");
-  }
-  // fallback
-  return Math.random().toString(36).slice(2) + "!A1";
-}
+const isValidStreamUrl = (url: string): boolean => {
+  const u = url.trim().toLowerCase();
+  return (
+    u.startsWith("http://") ||
+    u.startsWith("https://") ||
+    u.startsWith("rtmp://") ||
+    u.startsWith("rtsp://") ||
+    u.startsWith("udp://") ||
+    u.includes(".m3u8")
+  );
+};
 
 const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose }) => {
   const { toast } = useToast();
 
-  const [profiles, setProfiles] = useState<DbProfile[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [busyUserId, setBusyUserId] = useState<string | null>(null);
-
-  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
-
-  // NEW: theme toggle
+  // ---------- Theme ----------
   const [theme, setTheme] = useState<"light" | "dark">(getInitialTheme);
+  useEffect(() => applyTheme(theme), [theme]);
 
-  // NEW: search + filter
-  const [search, setSearch] = useState("");
-  const [roleFilter, setRoleFilter] = useState<"all" | "admin" | "user">("all");
-  const [showOnlyWithAnyPerm, setShowOnlyWithAnyPerm] = useState(false);
+  // ---------- Password ----------
+  const [pw, setPw] = useState({ pass1: "", pass2: "", show: false });
+  const [pwBusy, setPwBusy] = useState(false);
 
-  const [newUser, setNewUser] = useState({
-    email: "",
-    password: "",
-    role: "user" as "user" | "admin",
-    username: "",
+  // ---------- Streams ----------
+  const [streams, setStreams] = useState<StreamRow[]>([]);
+  const [streamsLoading, setStreamsLoading] = useState(false);
+
+  // editing state
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState({
+    name: "",
+    url: "",
+    resolution: "480p",
   });
+  const [saveBusy, setSaveBusy] = useState(false);
 
-  const [confirmDeleteUserId, setConfirmDeleteUserId] = useState<string | null>(
-    null
-  );
-
-  // NEW: password dialog (better UX than prompt)
-  const [pwDialog, setPwDialog] = useState<{ open: boolean; user?: DbProfile }>({
-    open: false,
-    user: undefined,
-  });
-  const [pwForm, setPwForm] = useState({
-    pass1: "",
-    pass2: "",
-    show: false,
-    copyAfterGenerate: false,
-  });
-
-  useEffect(() => {
-    applyTheme(theme);
-  }, [theme]);
-
-  useEffect(() => {
-    // get current user to prevent self-delete
-    const run = async () => {
-      const { data } = await supabase.auth.getUser();
-      setCurrentUserId(data?.user?.id ?? null);
-    };
-    void run();
-  }, []);
-
-  const sortedProfiles = useMemo(() => {
-    const arr = [...profiles];
-    arr.sort((a, b) => {
-      const ar = (a.role || "user").toLowerCase();
-      const br = (b.role || "user").toLowerCase();
-      if (ar !== br) return ar === "admin" ? -1 : 1;
-      return (a.username || "").localeCompare(b.username || "");
-    });
+  const sortedStreams = useMemo(() => {
+    const arr = [...streams];
+    arr.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
     return arr;
-  }, [profiles]);
+  }, [streams]);
 
-  const filteredProfiles = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return sortedProfiles.filter((p) => {
-      const isAdmin = (p.role || "user") === "admin";
-      if (roleFilter !== "all") {
-        if (roleFilter === "admin" && !isAdmin) return false;
-        if (roleFilter === "user" && isAdmin) return false;
-      }
-
-      if (showOnlyWithAnyPerm && !isAdmin) {
-        const roles = p.roles || {};
-        const anyTrue = allRoles.some((rk) => Boolean(roles[rk]));
-        if (!anyTrue) return false;
-      }
-
-      if (!q) return true;
-      const hay = `${p.username || ""} ${p.id} ${p.role || ""}`.toLowerCase();
-      return hay.includes(q);
-    });
-  }, [sortedProfiles, search, roleFilter, showOnlyWithAnyPerm]);
-
-  const groupedRoleKeys = useMemo(() => {
-    const groups: Record<"Streams" | "Lists" | "Logs", RoleKey[]> = {
-      Streams: [],
-      Lists: [],
-      Logs: [],
-    };
-    for (const rk of allRoles) groups[roleMeta[rk].group].push(rk);
-    return groups;
-  }, []);
-
-  const fetchProfiles = async () => {
-    setLoading(true);
+  const fetchStreams = useCallback(async () => {
+    setStreamsLoading(true);
     try {
       const { data, error } = await supabase
-        .from("profiles")
-        .select("id, username, role, roles")
+        .from("streams")
+        .select("id, user_id, name, url, resolution, color")
         .order("created_at", { ascending: true });
 
       if (error) {
-        console.error(error);
         toast({
-          title: "Error loading users",
+          title: "Error loading streams",
           description: error.message,
           variant: "destructive",
         });
-        setProfiles([]);
+        setStreams([]);
         return;
       }
 
-      setProfiles((data || []) as DbProfile[]);
+      const mapped: StreamRow[] = (data || []).map((row: DbStreamRow) => ({
+        id: row.id,
+        user_id: row.user_id,
+        name: row.name,
+        url: row.url,
+        resolution: row.resolution || "480p",
+      }));
+
+      setStreams(mapped);
     } finally {
-      setLoading(false);
+      setStreamsLoading(false);
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    if (isOpen) void fetchStreams();
+  }, [isOpen, fetchStreams]);
+
+  const openEdit = (s: StreamRow) => {
+    setEditingId(s.id);
+    setEditForm({
+      name: s.name || "",
+      url: s.url || "",
+      resolution: s.resolution || "480p",
+    });
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setEditForm({ name: "", url: "", resolution: "480p" });
+  };
+
+  const saveStream = async () => {
+    if (!editingId) return;
+
+    const name = editForm.name.trim() || "Stream";
+    const url = editForm.url.trim();
+
+    if (!isValidStreamUrl(url)) {
+      toast({
+        title: "Invalid URL",
+        description: "Enter a valid HLS (.m3u8), RTMP, RTSP, HTTP, or UDP URL.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setSaveBusy(true);
+    try {
+      const { error } = await supabase
+        .from("streams")
+        .update({
+          name,
+          url,
+          resolution: editForm.resolution,
+        })
+        .eq("id", editingId);
+
+      if (error) {
+        toast({
+          title: "Failed to update stream",
+          description: error.message,
+          variant: "destructive",
+        });
+        return;
+      }
+
+      toast({ title: "Stream updated" });
+      setStreams((prev) =>
+        prev.map((s) =>
+          s.id === editingId
+            ? { ...s, name, url, resolution: editForm.resolution }
+            : s
+        )
+      );
+      cancelEdit();
+    } finally {
+      setSaveBusy(false);
     }
   };
 
-  useEffect(() => {
-    if (isOpen) void fetchProfiles();
-  }, [isOpen]);
+  const deleteStream = async (id: string) => {
+    const confirmed = window.confirm("Delete this stream?");
+    if (!confirmed) return;
 
-  const handleCreateUser = async () => {
-    const email = newUser.email.trim().toLowerCase();
-    const username = (newUser.username || "").trim();
-    const password = newUser.password;
-
-    if (!email.includes("@")) {
-      return toast({
-        title: "Invalid email",
-        description: "Enter a valid email address.",
+    const { error } = await supabase.from("streams").delete().eq("id", id);
+    if (error) {
+      toast({
+        title: "Failed to delete stream",
+        description: error.message,
         variant: "destructive",
       });
+      return;
     }
-    if (password.length < 6) {
-      return toast({
+
+    setStreams((prev) => prev.filter((s) => s.id !== id));
+    toast({ title: "Stream deleted" });
+  };
+
+  // ✅ Change password for CURRENT logged-in user (no Edge function needed)
+  const changeMyPassword = async () => {
+    if (pw.pass1.length < 6) {
+      toast({
         title: "Password too short",
         description: "Min 6 characters.",
         variant: "destructive",
       });
+      return;
+    }
+    if (pw.pass1 !== pw.pass2) {
+      toast({ title: "Passwords do not match", variant: "destructive" });
+      return;
     }
 
-    setLoading(true);
+    setPwBusy(true);
     try {
-      const { data, error } = await supabase.functions.invoke("admin-users", {
-        body: {
-          action: "create",
-          email,
-          password,
-          role: newUser.role,
-          username: username || email,
-        },
+      const { error } = await supabase.auth.updateUser({
+        password: pw.pass1,
       });
 
-      if (error || data?.error) {
+      if (error) {
         toast({
-          title: "Error creating user",
-          description: error?.message || String(data?.error),
+          title: "Failed to update password",
+          description: error.message,
           variant: "destructive",
         });
         return;
       }
 
-      toast({ title: "User created successfully" });
-      setNewUser({ email: "", password: "", role: "user", username: "" });
-      await fetchProfiles();
-    } catch (e: any) {
-      console.error(e);
-      toast({
-        title: "Error creating user",
-        description: String(e?.message || e),
-        variant: "destructive",
-      });
+      toast({ title: "Password updated successfully" });
+      setPw({ pass1: "", pass2: "", show: false });
     } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleTogglePermission = async (
-    profile: DbProfile,
-    key: RoleKey,
-    value: boolean
-  ) => {
-    if ((profile.role || "user") === "admin") return; // admins always allowed
-    setBusyUserId(profile.id);
-
-    const nextRoles = { ...(profile.roles || {}) };
-    nextRoles[key] = value;
-
-    const { error } = await supabase
-      .from("profiles")
-      .update({ roles: nextRoles })
-      .eq("id", profile.id);
-
-    if (error) {
-      toast({
-        title: "Error updating permission",
-        description: error.message,
-        variant: "destructive",
-      });
-      setBusyUserId(null);
-      return;
-    }
-
-    toast({ title: "Permissions updated" });
-    setProfiles((prev) =>
-      prev.map((p) => (p.id === profile.id ? { ...p, roles: nextRoles } : p))
-    );
-    setBusyUserId(null);
-  };
-
-  const openPasswordDialog = (profile: DbProfile) => {
-    setPwForm({ pass1: "", pass2: "", show: false, copyAfterGenerate: false });
-    setPwDialog({ open: true, user: profile });
-  };
-
-  const handleUpdatePassword = async () => {
-    const user = pwDialog.user;
-    if (!user) return;
-
-    if (pwForm.pass1.length < 6) {
-      toast({
-        title: "Password too short",
-        description: "Password must be at least 6 characters long.",
-        variant: "destructive",
-      });
-      return;
-    }
-    if (pwForm.pass1 !== pwForm.pass2) {
-      toast({
-        title: "Passwords do not match",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    setBusyUserId(user.id);
-    const { data, error } = await supabase.functions.invoke("admin-users", {
-      body: {
-        action: "set_password",
-        user_id: user.id,
-        password: pwForm.pass1,
-      },
-    });
-
-    if (error || data?.error) {
-      toast({
-        title: "Error updating password",
-        description: error?.message || String(data?.error),
-        variant: "destructive",
-      });
-      setBusyUserId(null);
-      return;
-    }
-
-    toast({ title: "Password updated successfully" });
-    setPwDialog({ open: false, user: undefined });
-    setBusyUserId(null);
-  };
-
-  const handleDeleteUser = async (userId: string) => {
-    if (userId === currentUserId) {
-      toast({
-        title: "Action not allowed",
-        description: "You can't delete your own account.",
-        variant: "destructive",
-      });
-      setConfirmDeleteUserId(null);
-      return;
-    }
-
-    setBusyUserId(userId);
-    try {
-      const { data, error } = await supabase.functions.invoke("admin-users", {
-        body: { action: "delete", user_id: userId },
-      });
-
-      if (error || data?.error) {
-        toast({
-          title: "Error deleting user",
-          description: error?.message || String(data?.error),
-          variant: "destructive",
-        });
-        return;
-      }
-
-      toast({ title: "User deleted successfully" });
-      setConfirmDeleteUserId(null);
-      await fetchProfiles();
-    } catch (e: any) {
-      toast({
-        title: "Error deleting user",
-        description: String(e?.message || e),
-        variant: "destructive",
-      });
-    } finally {
-      setBusyUserId(null);
-      setConfirmDeleteUserId(null);
+      setPwBusy(false);
     }
   };
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-[860px] max-h-[85vh] overflow-y-auto">
+      <DialogContent className="sm:max-w-[880px] max-h-[85vh] overflow-y-auto">
         <DialogHeader className="sticky top-0 bg-background z-10 pb-3">
           <div className="flex items-center justify-between gap-3">
-            <DialogTitle>User Management (Supabase)</DialogTitle>
+            <DialogTitle>Settings</DialogTitle>
 
-            {/* NEW: theme toggle */}
+            {/* Theme toggle */}
             <div className="flex items-center gap-2">
               <Label htmlFor="theme-toggle" className="text-sm">
                 Dark
@@ -434,441 +275,153 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose }) 
           </div>
         </DialogHeader>
 
-        <div className="grid gap-4 py-4">
-          {/* NEW: Quick controls */}
+        <div className="grid gap-6 py-2">
+          {/* Change My Password */}
           <div className="rounded-xl border p-4">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
-              <div className="sm:col-span-2">
-                <Label htmlFor="search-users">Search users</Label>
-                <Input
-                  id="search-users"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search by username / role / id..."
-                />
-              </div>
-
-              <div>
-                <Label htmlFor="role-filter">Role filter</Label>
-                <select
-                  id="role-filter"
-                  className="h-10 w-full rounded-md border bg-background px-3 text-sm"
-                  value={roleFilter}
-                  onChange={(e) =>
-                    setRoleFilter(e.target.value as "all" | "admin" | "user")
-                  }
-                >
-                  <option value="all">All</option>
-                  <option value="admin">Admins</option>
-                  <option value="user">Users</option>
-                </select>
-              </div>
-
-              <div className="sm:col-span-3 flex items-center justify-between gap-3 pt-1">
-                <div className="flex items-center gap-2">
-                  <Switch
-                    id="only-perm"
-                    checked={showOnlyWithAnyPerm}
-                    onCheckedChange={(v) => setShowOnlyWithAnyPerm(!!v)}
-                  />
-                  <Label htmlFor="only-perm" className="text-sm">
-                    Show only users with any permission enabled
-                  </Label>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="secondary"
-                    onClick={() => void fetchProfiles()}
-                    disabled={loading}
-                  >
-                    Refresh
-                  </Button>
-                  {loading && (
-                    <span className="text-sm text-muted-foreground">Loading…</span>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Create User */}
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              void handleCreateUser();
-            }}
-            className="rounded-xl border p-4"
-          >
-            <div className="flex items-center justify-between gap-3 mb-2">
-              <h3 className="text-lg font-semibold">Create User</h3>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => {
-                  const gen = makeRandomPassword(12);
-                  setNewUser((s) => ({ ...s, password: gen }));
-                  try {
-                    navigator.clipboard?.writeText(gen);
-                    toast({ title: "Generated password copied to clipboard" });
-                  } catch {
-                    toast({ title: "Generated password ready" });
-                  }
-                }}
-              >
-                Generate Password
-              </Button>
-            </div>
+            <h3 className="text-lg font-semibold mb-3">Change Password</h3>
 
             <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 items-center">
-              <Label htmlFor="new-email" className="sm:col-span-1">
-                Email
-              </Label>
+              <Label className="sm:col-span-1">New password</Label>
               <Input
-                id="new-email"
                 className="sm:col-span-3"
-                value={newUser.email}
-                onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
-                placeholder="user@email.com"
-                autoComplete="off"
-                required
+                type={pw.show ? "text" : "password"}
+                value={pw.pass1}
+                onChange={(e) => setPw((s) => ({ ...s, pass1: e.target.value }))}
+                placeholder="Min 6 characters"
+                autoComplete="new-password"
               />
 
-              <Label htmlFor="new-username" className="sm:col-span-1">
-                Username
-              </Label>
+              <Label className="sm:col-span-1">Confirm</Label>
               <Input
-                id="new-username"
                 className="sm:col-span-3"
-                value={newUser.username}
-                onChange={(e) =>
-                  setNewUser({ ...newUser, username: e.target.value })
-                }
-                placeholder="Optional display name"
-                autoComplete="off"
+                type={pw.show ? "text" : "password"}
+                value={pw.pass2}
+                onChange={(e) => setPw((s) => ({ ...s, pass2: e.target.value }))}
+                placeholder="Repeat password"
+                autoComplete="new-password"
               />
-
-              <Label htmlFor="new-password" className="sm:col-span-1">
-                Password
-              </Label>
-              <Input
-                id="new-password"
-                type="password"
-                className="sm:col-span-3"
-                value={newUser.password}
-                onChange={(e) =>
-                  setNewUser({ ...newUser, password: e.target.value })
-                }
-                placeholder="Minimum 6 characters"
-                required
-                minLength={6}
-              />
-
-              <Label htmlFor="new-role" className="sm:col-span-1">
-                Role
-              </Label>
-              <select
-                id="new-role"
-                className="sm:col-span-3 h-10 rounded-md border bg-background px-3 text-sm"
-                value={newUser.role}
-                onChange={(e) =>
-                  setNewUser({
-                    ...newUser,
-                    role: e.target.value as "user" | "admin",
-                  })
-                }
-              >
-                <option value="user">user</option>
-                <option value="admin">admin</option>
-              </select>
             </div>
 
-            <div className="mt-4 flex items-center gap-3">
+            <div className="mt-3 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="showpw"
+                  checked={pw.show}
+                  onCheckedChange={(v) => setPw((s) => ({ ...s, show: !!v }))}
+                />
+                <Label htmlFor="showpw" className="text-sm">
+                  Show password
+                </Label>
+              </div>
+
               <Button
-                type="submit"
-                disabled={
-                  loading ||
-                  newUser.email.trim().length < 5 ||
-                  newUser.password.length < 6
-                }
+                onClick={() => void changeMyPassword()}
+                disabled={pwBusy || pw.pass1.length < 6 || pw.pass1 !== pw.pass2}
               >
-                Create User
+                Update Password
               </Button>
             </div>
-          </form>
+          </div>
 
-          {/* Users List */}
-          <div className="mt-2">
+          {/* Stream Editor */}
+          <div className="rounded-xl border p-4">
             <div className="flex items-center justify-between gap-3 mb-3">
-              <h3 className="text-lg font-semibold">Users and Permissions</h3>
-              <div className="text-sm text-muted-foreground">
-                Showing {filteredProfiles.length} / {sortedProfiles.length}
-              </div>
+              <h3 className="text-lg font-semibold">Manage Streams</h3>
+              <Button variant="secondary" onClick={() => void fetchStreams()} disabled={streamsLoading}>
+                Refresh
+              </Button>
             </div>
 
-            <div className="max-h-[60vh] overflow-y-auto pr-2">
-              {filteredProfiles.map((p) => {
-                const display = p.username || p.id;
-                const isAdmin = (p.role || "user") === "admin";
-                const roles = p.roles || {};
-                const isSelf = currentUserId && p.id === currentUserId;
+            {streamsLoading ? (
+              <div className="text-sm text-muted-foreground">Loading…</div>
+            ) : sortedStreams.length === 0 ? (
+              <div className="text-sm text-muted-foreground">No streams found.</div>
+            ) : (
+              <div className="grid gap-3">
+                {sortedStreams.map((s) => {
+                  const isEditing = editingId === s.id;
 
-                return (
-                  <div key={p.id} className="mb-4 p-4 border rounded-lg">
-                    <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2">
-                      <div className="flex items-center gap-2">
-                        <h4 className="font-bold">{display}</h4>
-                        <span
-                          className={`text-xs px-2 py-1 rounded-full border ${
-                            isAdmin ? "font-semibold" : ""
-                          }`}
-                          title={isAdmin ? "Admin has all permissions" : "Standard user"}
-                        >
-                          {p.role || "user"}
-                        </span>
-                        {isSelf && (
-                          <span className="text-xs px-2 py-1 rounded-full border">
-                            you
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="flex gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          disabled={busyUserId === p.id}
-                          onClick={() => openPasswordDialog(p)}
-                        >
-                          Change Password
-                        </Button>
-
-                        <Button
-                          variant="destructive"
-                          size="sm"
-                          disabled={isAdmin || isSelf || busyUserId === p.id}
-                          onClick={() => setConfirmDeleteUserId(p.id)}
-                          title={
-                            isAdmin
-                              ? "Admins cannot be deleted here"
-                              : isSelf
-                              ? "You can't delete your own account"
-                              : "Delete user"
-                          }
-                        >
-                          Delete User
-                        </Button>
-                      </div>
-                    </div>
-
-                    {/* NEW: grouped permissions + descriptions */}
-                    <div className="mt-4 grid gap-4">
-                      {(["Streams", "Lists", "Logs"] as const).map((grp) => (
-                        <div key={grp} className="rounded-lg border p-3">
-                          <div className="flex items-center justify-between mb-2">
-                            <div className="font-semibold">{grp}</div>
-                            {isAdmin && (
-                              <div className="text-xs text-muted-foreground">
-                                Admin: always allowed
-                              </div>
-                            )}
+                  return (
+                    <div key={s.id} className="rounded-lg border p-3">
+                      {!isEditing ? (
+                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="font-semibold truncate">{s.name}</div>
+                            <div className="text-xs text-muted-foreground font-mono truncate">
+                              {s.url}
+                            </div>
+                            <div className="text-xs text-muted-foreground mt-1">
+                              Resolution: {s.resolution}
+                            </div>
                           </div>
 
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                            {groupedRoleKeys[grp].map((rk) => (
-                              <div
-                                key={rk}
-                                className="flex items-start justify-between gap-3 rounded-md border p-3"
-                              >
-                                <div className="min-w-0">
-                                  <Label
-                                    htmlFor={`${p.id}-${rk}`}
-                                    className="font-medium"
-                                    title={roleMeta[rk].description}
-                                  >
-                                    {roleMeta[rk].label}
-                                  </Label>
-                                  <p className="text-xs text-muted-foreground mt-1">
-                                    {roleMeta[rk].description}
-                                  </p>
-                                </div>
-
-                                <Switch
-                                  id={`${p.id}-${rk}`}
-                                  checked={isAdmin ? true : Boolean(roles[rk])}
-                                  onCheckedChange={(value) =>
-                                    void handleTogglePermission(p, rk, !!value)
-                                  }
-                                  disabled={isAdmin || busyUserId === p.id}
-                                />
-                              </div>
-                            ))}
+                          <div className="flex items-center gap-2">
+                            <Button variant="outline" size="sm" onClick={() => openEdit(s)}>
+                              Edit
+                            </Button>
+                            <Button variant="destructive" size="sm" onClick={() => void deleteStream(s.id)}>
+                              Delete
+                            </Button>
                           </div>
                         </div>
-                      ))}
-                    </div>
-                  </div>
-                );
-              })}
+                      ) : (
+                        <div className="grid gap-3">
+                          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-center">
+                            <Label className="sm:col-span-1">Name</Label>
+                            <Input
+                              className="sm:col-span-3"
+                              value={editForm.name}
+                              onChange={(e) => setEditForm((f) => ({ ...f, name: e.target.value }))}
+                              placeholder="Stream name"
+                            />
 
-              {filteredProfiles.length === 0 && (
-                <div className="text-sm text-muted-foreground p-4 border rounded-lg">
-                  No users match your filters (or you don’t have permission).
-                </div>
-              )}
-            </div>
+                            <Label className="sm:col-span-1">URL</Label>
+                            <Input
+                              className="sm:col-span-3"
+                              value={editForm.url}
+                              onChange={(e) => setEditForm((f) => ({ ...f, url: e.target.value }))}
+                              placeholder="Stream URL"
+                            />
+
+                            <Label className="sm:col-span-1">Resolution</Label>
+                            <div className="sm:col-span-3">
+                              <Select
+                                value={editForm.resolution}
+                                onValueChange={(v) => setEditForm((f) => ({ ...f, resolution: v }))}
+                              >
+                                <SelectTrigger className="w-[160px] bg-input border-stream-border">
+                                  <SelectValue placeholder="Resolution" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="480p">480p</SelectItem>
+                                  <SelectItem value="720p">720p</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          </div>
+
+                          <div className="flex justify-end gap-2">
+                            <Button variant="outline" onClick={cancelEdit}>
+                              Cancel
+                            </Button>
+                            <Button onClick={() => void saveStream()} disabled={saveBusy}>
+                              Save
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Note */}
+          <div className="text-xs text-muted-foreground">
+            Permissions are removed because all users are treated as admin in this app.
           </div>
         </div>
-
-        {/* NEW: Change Password Dialog */}
-        <Dialog
-          open={pwDialog.open}
-          onOpenChange={(open) => !open && setPwDialog({ open: false, user: undefined })}
-        >
-          <DialogContent className="sm:max-w-[520px]">
-            <DialogHeader>
-              <DialogTitle>
-                Change Password — {pwDialog.user?.username || pwDialog.user?.id}
-              </DialogTitle>
-            </DialogHeader>
-
-            <div className="grid gap-3">
-              <div className="grid gap-2">
-                <Label>New password</Label>
-                <Input
-                  type={pwForm.show ? "text" : "password"}
-                  value={pwForm.pass1}
-                  onChange={(e) => setPwForm((s) => ({ ...s, pass1: e.target.value }))}
-                  placeholder="Min 6 characters"
-                  autoComplete="off"
-                />
-              </div>
-
-              <div className="grid gap-2">
-                <Label>Confirm password</Label>
-                <Input
-                  type={pwForm.show ? "text" : "password"}
-                  value={pwForm.pass2}
-                  onChange={(e) => setPwForm((s) => ({ ...s, pass2: e.target.value }))}
-                  placeholder="Repeat password"
-                  autoComplete="off"
-                />
-              </div>
-
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <Switch
-                    id="showpw"
-                    checked={pwForm.show}
-                    onCheckedChange={(v) => setPwForm((s) => ({ ...s, show: !!v }))}
-                  />
-                  <Label htmlFor="showpw" className="text-sm">
-                    Show password
-                  </Label>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <Switch
-                    id="copygen"
-                    checked={pwForm.copyAfterGenerate}
-                    onCheckedChange={(v) =>
-                      setPwForm((s) => ({ ...s, copyAfterGenerate: !!v }))
-                    }
-                  />
-                  <Label htmlFor="copygen" className="text-sm">
-                    Copy on generate
-                  </Label>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between gap-2">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={() => {
-                    const gen = makeRandomPassword(12);
-                    setPwForm((s) => ({ ...s, pass1: gen, pass2: gen }));
-                    if (pwForm.copyAfterGenerate) {
-                      try {
-                        navigator.clipboard?.writeText(gen);
-                        toast({ title: "Generated password copied" });
-                      } catch {
-                        toast({ title: "Generated password ready" });
-                      }
-                    }
-                  }}
-                >
-                  Generate
-                </Button>
-
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => {
-                    const v = pwForm.pass1;
-                    if (!v) return toast({ title: "Nothing to copy" });
-                    try {
-                      navigator.clipboard?.writeText(v);
-                      toast({ title: "Copied to clipboard" });
-                    } catch {
-                      toast({ title: "Copy failed", variant: "destructive" });
-                    }
-                  }}
-                >
-                  Copy
-                </Button>
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2">
-                <Button
-                  variant="outline"
-                  onClick={() => setPwDialog({ open: false, user: undefined })}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  disabled={
-                    !pwDialog.user ||
-                    busyUserId === pwDialog.user.id ||
-                    pwForm.pass1.length < 6 ||
-                    pwForm.pass1 !== pwForm.pass2
-                  }
-                  onClick={() => void handleUpdatePassword()}
-                >
-                  Update
-                </Button>
-              </div>
-            </div>
-          </DialogContent>
-        </Dialog>
-
-        {/* Delete confirmation */}
-        <AlertDialog
-          open={!!confirmDeleteUserId}
-          onOpenChange={(open) => !open && setConfirmDeleteUserId(null)}
-        >
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Delete user?</AlertDialogTitle>
-              <AlertDialogDescription>
-                This action cannot be undone. The user account will be permanently removed.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel disabled={busyUserId === confirmDeleteUserId}>
-                Cancel
-              </AlertDialogCancel>
-              <AlertDialogAction
-                onClick={() =>
-                  confirmDeleteUserId && void handleDeleteUser(confirmDeleteUserId)
-                }
-                disabled={busyUserId === confirmDeleteUserId}
-              >
-                Continue
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
       </DialogContent>
     </Dialog>
   );
