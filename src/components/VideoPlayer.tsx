@@ -40,7 +40,6 @@ const HLS_BASE =
   (import.meta.env.VITE_HLS_BASE?.replace(/\/+$/, "")) ||
   `${window.location.protocol}//${window.location.hostname}:8000`;
 
-// Is this URL already our own /live/... endpoint?
 const isOurHlsUrl = (url: string): boolean => {
   try {
     const base = HLS_BASE || `${window.location.protocol}//${window.location.host}`;
@@ -52,7 +51,6 @@ const isOurHlsUrl = (url: string): boolean => {
   }
 };
 
-// Cache busting
 const withCacheBuster = (url: string) => {
   const tick = Date.now().toString();
   try {
@@ -86,8 +84,6 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
   const [hasError, setHasError] = useState(false);
   const [errorText, setErrorText] = useState<string>("");
   const [isLoading, setIsLoading] = useState(true);
-
-  // IMPORTANT CHANGE: default TRUE so we start immediately (no waiting)
   const [isVisible, setIsVisible] = useState(true);
 
   const [computedStatus, setComputedStatus] = useState<"online" | "offline">("online");
@@ -100,10 +96,17 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
 
   const fragLoadedRef = useRef(false);
   const manifestWatchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const teardownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const retryCountRef = useRef(0);
   const MAX_RETRIES = 10;
+
+  // ✅ NEW: prevents race between teardown/init
+  const initSeqRef = useRef(0);
+
+  // ✅ NEW: track video error listener so we can remove it
+  const videoErrorHandlerRef = useRef<((this: HTMLVideoElement, ev: Event) => any) | null>(
+    null
+  );
 
   const getStreamType = useCallback((url: string) => {
     if (url.includes(".m3u8")) return "HLS";
@@ -124,41 +127,83 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     [streamId]
   );
 
+  // ✅ HARD teardown in correct order
   const teardownPlayer = useCallback(() => {
-    const v = videoRef.current;
-    if (!v) return;
+    const video = videoRef.current;
 
-    try {
-      if (hlsRef.current) {
-        hlsRef.current.destroy();
-        hlsRef.current = null;
-      }
-    } catch (e) {
-      console.warn("teardownPlayer: failed to destroy hls", e);
-    }
+    // bump init sequence to invalidate old callbacks
+    initSeqRef.current += 1;
 
-    try {
-      v.pause();
-      v.removeAttribute("src");
-      v.load();
-    } catch (e) {
-      console.warn("teardownPlayer: failed to reset video element", e);
-    }
-
+    // clear timers
     if (manifestWatchRef.current) {
       clearTimeout(manifestWatchRef.current);
       manifestWatchRef.current = null;
+    }
+
+    // remove video error handler
+    if (video && videoErrorHandlerRef.current) {
+      try {
+        video.removeEventListener("error", videoErrorHandlerRef.current);
+      } catch {}
+      videoErrorHandlerRef.current = null;
+    }
+
+    // stop/detach/destroy HLS in safest order
+    const hls = hlsRef.current;
+    if (hls) {
+      try {
+        hls.stopLoad();
+      } catch {}
+      try {
+        hls.detachMedia();
+      } catch {}
+      try {
+        hls.destroy();
+      } catch {}
+      hlsRef.current = null;
+    }
+
+    // reset video last (after HLS is gone)
+    if (video) {
+      try {
+        video.pause();
+      } catch {}
+      try {
+        video.removeAttribute("src");
+        video.load();
+      } catch {}
     }
 
     fragLoadedRef.current = false;
     setIsPlaying(false);
   }, []);
 
+  const safePlay = useCallback(async (seq: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (seq !== initSeqRef.current) return;
+
+    video.muted = isMuted;
+
+    try {
+      await video.play();
+      if (seq !== initSeqRef.current) return;
+      setIsPlaying(true);
+      retryCountRef.current = 0;
+    } catch (err) {
+      if (seq !== initSeqRef.current) return;
+      handleError(`Playback failed: ${String(err)}`);
+    }
+  }, [handleError, isMuted]);
+
   const initializeStream = useCallback(async () => {
     const video = videoRef.current;
     if (!video) return;
 
-    // Autoplay policies: start muted + inline
+    // Create a new init "session"
+    const seq = ++initSeqRef.current;
+
+    // basic autoplay policy
     video.muted = true;
     video.playsInline = true;
 
@@ -169,14 +214,16 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     setErrorText("");
     fragLoadedRef.current = false;
 
-    if (manifestWatchRef.current) clearTimeout(manifestWatchRef.current);
+    // ✅ teardown any previous HLS first
     teardownPlayer();
+
+    // after teardown, make sure this init is still the latest
+    if (seq !== initSeqRef.current) return;
 
     let finalStreamUrl: string = proxiedHlsUrl || streamUrl;
     const mustProxy = !finalStreamUrl.includes(".m3u8");
     const streamType = getStreamType(streamUrl);
 
-    // If not .m3u8 or not our HLS endpoint -> request server proxy/start
     if (mustProxy || !isOurHlsUrl(finalStreamUrl)) {
       try {
         const token = getToken();
@@ -193,14 +240,10 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
         let parsed: { hlsAbsUrl?: string; hlsUrl?: string } | undefined;
         try {
           parsed = JSON.parse(dataRaw);
-        } catch {
-          // ignore
-        }
+        } catch {}
 
         const hlsAbs =
-          parsed?.hlsAbsUrl ||
-          parsed?.hlsUrl ||
-          (typeof dataRaw === "string" && dataRaw.trim());
+          parsed?.hlsAbsUrl || parsed?.hlsUrl || (typeof dataRaw === "string" && dataRaw.trim());
 
         if (hlsAbs) {
           finalStreamUrl = hlsAbs.startsWith("/") ? `${HLS_BASE}${hlsAbs}` : hlsAbs;
@@ -210,24 +253,27 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
         }
       } catch (e) {
         if (mustProxy) {
+          if (seq !== initSeqRef.current) return;
           return handleError(`Failed to prepare server HLS proxy (${streamType}): ${String(e)}`);
         }
-        // if it was already m3u8 but not ours, we can still attempt direct play
       }
     }
 
+    if (seq !== initSeqRef.current) return;
     finalStreamUrl = withCacheBuster(finalStreamUrl);
 
-    // Watchdog: if manifest loads but no fragments, retry
+    // watchdog
     if (manifestWatchRef.current) clearTimeout(manifestWatchRef.current);
     manifestWatchRef.current = setTimeout(() => {
+      if (seq !== initSeqRef.current) return;
       if (!fragLoadedRef.current) {
         handleError("No HLS fragments received (timeout). Likely CORS/403/blocked segments.");
       }
     }, 12_000);
 
-    // Capture HTML video errors too
+    // video element error listener (removable)
     const onVideoError = () => {
+      if (seq !== initSeqRef.current) return;
       const code = video.error?.code;
       const msg =
         code === 1 ? "MEDIA_ERR_ABORTED" :
@@ -237,16 +283,25 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
         "Unknown video error";
       handleError(`Video element error: ${msg}`);
     };
-    video.addEventListener("error", onVideoError, { once: true });
+    videoErrorHandlerRef.current = onVideoError;
+    video.addEventListener("error", onVideoError);
 
+    // Hls.js
     if (Hls.isSupported()) {
       const hls = new Hls({
         enableWorker: true,
         lowLatencyMode: false,
+
+        // ✅ helps reduce buffer weirdness during quick reloads
+        backBufferLength: 30,
+        maxBufferLength: 20,
+        maxMaxBufferLength: 40,
       });
+
       hlsRef.current = hls;
 
       hls.on(Hls.Events.FRAG_LOADED, (_e, data) => {
+        if (seq !== initSeqRef.current) return;
         fragLoadedRef.current = true;
         const { frag } = data;
         if (frag?.stats && frag?.duration) {
@@ -259,11 +314,12 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
         }
       });
 
-      // IMPORTANT CHANGE: show real details (manifestLoadError / fragLoadError / HTTP codes)
-      hls.on(Hls.Events.ERROR, (_event, data) => {
+      // ✅ CRITICAL: recover / recreate on specific fatal errors
+      hls.on(Hls.Events.ERROR, async (_event, data) => {
+        if (seq !== initSeqRef.current) return;
+
         const details = data?.details || "unknown";
         const type = data?.type || "unknown";
-        const fatal = data?.fatal ? "fatal" : "non-fatal";
         const resp: any = (data as any)?.response;
         const statusCode = resp?.code ? `HTTP ${resp.code}` : "";
         const url = resp?.url ? `URL: ${resp.url}` : "";
@@ -271,24 +327,48 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
 
         console.error("HLS ERROR", data);
 
-        if (data.fatal) {
-          handleError(`HLS ${fatal}: ${type} / ${details} ${statusCode} ${url} ${reason}`.trim());
+        // Non-fatal: let hls handle
+        if (!data.fatal) return;
+
+        // Fatal media error: try recoverMediaError()
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          try {
+            hls.recoverMediaError();
+            return;
+          } catch {
+            // fallthrough to full recreate
+          }
         }
+
+        // Fatal appendBuffer / buffer errors: full recreate is most reliable
+        const isAppendOrBuffer =
+          details === Hls.ErrorDetails.BUFFER_APPEND_ERROR ||
+          details === Hls.ErrorDetails.BUFFER_STALLED_ERROR ||
+          details === Hls.ErrorDetails.BUFFER_FULL_ERROR;
+
+        if (isAppendOrBuffer) {
+          // Avoid “appendBuffer on removed SourceBuffer” by tearing down fully
+          teardownPlayer();
+          if (seq !== initSeqRef.current) return;
+          // small delay helps browser release MediaSource
+          setTimeout(() => {
+            if (seq !== initSeqRef.current) return;
+            void initializeStream();
+          }, 250);
+          return;
+        }
+
+        // Any other fatal: show error (and your retry effect can re-init)
+        handleError(`HLS fatal: ${type} / ${details} ${statusCode} ${url} ${reason}`.trim());
       });
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (seq !== initSeqRef.current) return;
         setIsLoading(false);
-        video.muted = isMuted;
-
-        video
-          .play()
-          .then(() => {
-            setIsPlaying(true);
-            retryCountRef.current = 0;
-          })
-          .catch((err) => handleError(`Playback failed: ${String(err)}`));
+        void safePlay(seq);
       });
 
+      // ✅ attach first, then loadSource (recommended pattern)
       hls.attachMedia(video);
       hls.loadSource(finalStreamUrl);
       return;
@@ -298,21 +378,14 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = finalStreamUrl;
       video.load();
-      video.addEventListener(
-        "loadedmetadata",
-        () => {
-          setIsLoading(false);
-          video.muted = isMuted;
-          video
-            .play()
-            .then(() => {
-              setIsPlaying(true);
-              retryCountRef.current = 0;
-            })
-            .catch((err) => handleError(`Playback failed: ${String(err)}`));
-        },
-        { once: true }
-      );
+
+      const onLoaded = () => {
+        if (seq !== initSeqRef.current) return;
+        setIsLoading(false);
+        void safePlay(seq);
+      };
+
+      video.addEventListener("loadedmetadata", onLoaded, { once: true });
       return;
     }
 
@@ -326,13 +399,13 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     getStreamType,
     handleError,
     teardownPlayer,
-    isMuted,
+    safePlay,
     onBitrateUpdate,
     streamId,
     status,
   ]);
 
-  // Retry logic
+  // Retry logic (kept)
   useEffect(() => {
     if (!hasError) return;
     if (retryCountRef.current >= MAX_RETRIES) return;
@@ -341,7 +414,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
       retryCountRef.current += 1;
       setHasError(false);
       setErrorText("");
-      initializeStream();
+      void initializeStream();
     }, 2500);
 
     return () => clearTimeout(timer);
@@ -359,7 +432,6 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     else setComputedStatus("offline");
   }, [status, measuredBitrate]);
 
-  // Visibility observer (kept, but does NOT block startup anymore)
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -376,15 +448,13 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
   // Start immediately on mount + whenever streamUrl changes/reloadKey changes
   useEffect(() => {
     retryCountRef.current = 0;
-    initializeStream();
+    void initializeStream();
 
     return () => {
       teardownPlayer();
-      if (manifestWatchRef.current) clearTimeout(manifestWatchRef.current);
-      if (teardownTimerRef.current) clearTimeout(teardownTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reloadKey, streamUrl]);
+  }, [reloadKey, streamUrl, resolution]);
 
   // Handle muted preference
   useEffect(() => {
@@ -490,7 +560,12 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
                 {errorText}
               </p>
             )}
-            <Button onClick={initializeStream} variant="outline" size="sm" className="mt-3">
+            <Button
+              onClick={() => void initializeStream()}
+              variant="outline"
+              size="sm"
+              className="mt-3"
+            >
               <RefreshCcw className="h-4 w-4 mr-2" />
               Retry
             </Button>
