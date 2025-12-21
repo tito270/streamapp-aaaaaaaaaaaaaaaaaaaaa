@@ -128,41 +128,31 @@ export const StreamManager: React.FC = () => {
 
   // ---------- Activity Logs insert (best-effort, never blocks UI) ----------
   const logActivity = useCallback(
-    async (row: Omit<ActivityLogInsert, "actor_email" | "actor_id"> & { actor_id?: string | null; actor_email?: string | null }) => {
+    async (row: {
+      action: string;
+      target_type?: string | null;
+      target_id?: string | null;
+      target_name?: string | null;
+      description?: string | null;
+    }) => {
       try {
-        // Get actor email/id if not provided
-        let actor_email = row.actor_email ?? null;
-        let actor_id = row.actor_id ?? null;
-
-        if (!actor_email || !actor_id) {
-          const { data, error } = await supabase.auth.getUser();
-          if (!error) {
-            actor_email = actor_email ?? data.user?.email ?? null;
-            actor_id = actor_id ?? data.user?.id ?? null;
-          }
-        }
-
-        const payload: ActivityLogInsert = {
-          actor_id,
-          actor_email,
+        const payload = {
           action: row.action,
           target_type: row.target_type ?? null,
           target_id: row.target_id ?? null,
           target_name: row.target_name ?? null,
           description: row.description ?? null,
         };
-
+  
         const { error } = await supabase.from("activity_logs").insert(payload);
-        if (error) {
-          // Don’t toast; just log. This avoids spamming UI if RLS is wrong.
-          console.warn("activity_logs insert blocked/failed:", error.message);
-        }
+        if (error) console.warn("activity_logs insert failed:", error.message);
       } catch (e) {
         console.warn("activity_logs insert exception:", e);
       }
     },
     []
   );
+
 
   // --------- Bitrate DB buffer ----------
   const bitrateBufferRef = useRef<BitrateLogRow[]>([]);
