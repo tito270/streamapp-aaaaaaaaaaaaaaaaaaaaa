@@ -1,15 +1,6 @@
 import React, { useRef, useState, useEffect, useCallback } from "react";
 import Hls from "hls.js";
-import {
-  X,
-  AlertCircle,
-  Play,
-  Pause,
-  Volume2,
-  VolumeX,
-  Maximize,
-  RefreshCcw,
-} from "lucide-react";
+import { X, AlertCircle, Play, Pause, Volume2, VolumeX, Maximize, RefreshCcw } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -87,7 +78,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
   const [errorText, setErrorText] = useState<string>("");
   const [isLoading, setIsLoading] = useState(true);
 
-  // IMPORTANT CHANGE: default TRUE so we start immediately (no waiting)
+  // Start immediately; visibility only used for optional skip.
   const [isVisible, setIsVisible] = useState(true);
 
   const [computedStatus, setComputedStatus] = useState<"online" | "offline">("online");
@@ -104,6 +95,10 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
 
   const retryCountRef = useRef(0);
   const MAX_RETRIES = 10;
+
+  // ---- NEW: guard against play() races / overlapping loads ----
+  const loadSeqRef = useRef(0);
+  const abortInitRef = useRef<(() => void) | null>(null);
 
   const getStreamType = useCallback((url: string) => {
     if (url.includes(".m3u8")) return "HLS";
@@ -140,7 +135,8 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     try {
       v.pause();
       v.removeAttribute("src");
-      v.load();
+      // NOTE: removing v.load() helps reduce AbortError races
+      // v.load();
     } catch (e) {
       console.warn("teardownPlayer: failed to reset video element", e);
     }
@@ -158,7 +154,18 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     const video = videoRef.current;
     if (!video) return;
 
-    // Autoplay policies: start muted + inline
+    // ---- NEW: sequence + cancellation (prevents AbortError spam) ----
+    const mySeq = ++loadSeqRef.current;
+    let cancelled = false;
+
+    abortInitRef.current?.();
+    abortInitRef.current = () => {
+      cancelled = true;
+    };
+
+    const isStale = () => cancelled || mySeq !== loadSeqRef.current;
+
+    // Autoplay policies
     video.muted = true;
     video.playsInline = true;
 
@@ -170,6 +177,8 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     fragLoadedRef.current = false;
 
     if (manifestWatchRef.current) clearTimeout(manifestWatchRef.current);
+
+    // teardown previous player before new load
     teardownPlayer();
 
     let finalStreamUrl: string = proxiedHlsUrl || streamUrl;
@@ -188,6 +197,8 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
           },
           body: JSON.stringify({ streamUrl, streamName, resolution }),
         });
+
+        if (isStale()) return;
 
         const dataRaw = await res.text();
         let parsed: { hlsAbsUrl?: string; hlsUrl?: string } | undefined;
@@ -216,28 +227,49 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
       }
     }
 
+    if (isStale()) return;
+
     finalStreamUrl = withCacheBuster(finalStreamUrl);
 
-    // Watchdog: if manifest loads but no fragments, retry
+    // Watchdog: if manifest loads but no fragments, retry/error
     if (manifestWatchRef.current) clearTimeout(manifestWatchRef.current);
     manifestWatchRef.current = setTimeout(() => {
-      if (!fragLoadedRef.current) {
+      if (!fragLoadedRef.current && !isStale()) {
         handleError("No HLS fragments received (timeout). Likely CORS/403/blocked segments.");
       }
     }, 12_000);
 
     // Capture HTML video errors too
     const onVideoError = () => {
+      if (isStale()) return;
       const code = video.error?.code;
       const msg =
-        code === 1 ? "MEDIA_ERR_ABORTED" :
-        code === 2 ? "MEDIA_ERR_NETWORK (network/CORS/blocked)" :
-        code === 3 ? "MEDIA_ERR_DECODE (codec unsupported)" :
-        code === 4 ? "MEDIA_ERR_SRC_NOT_SUPPORTED" :
-        "Unknown video error";
+        code === 1
+          ? "MEDIA_ERR_ABORTED"
+          : code === 2
+          ? "MEDIA_ERR_NETWORK (network/CORS/blocked)"
+          : code === 3
+          ? "MEDIA_ERR_DECODE (codec unsupported)"
+          : code === 4
+          ? "MEDIA_ERR_SRC_NOT_SUPPORTED"
+          : "Unknown video error";
       handleError(`Video element error: ${msg}`);
     };
     video.addEventListener("error", onVideoError, { once: true });
+
+    const safePlay = async () => {
+      try {
+        if (isStale()) return;
+        await video.play();
+        if (isStale()) return;
+        setIsPlaying(true);
+        retryCountRef.current = 0;
+      } catch (err: any) {
+        // AbortError is expected when reload/teardown happens quickly.
+        if (err?.name === "AbortError") return;
+        handleError(`Playback failed: ${String(err)}`);
+      }
+    };
 
     if (Hls.isSupported()) {
       const hls = new Hls({
@@ -247,7 +279,9 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
       hlsRef.current = hls;
 
       hls.on(Hls.Events.FRAG_LOADED, (_e, data) => {
+        if (isStale()) return;
         fragLoadedRef.current = true;
+
         const { frag } = data;
         if (frag?.stats && frag?.duration) {
           const mbps = (frag.stats.loaded * 8) / 1e6 / frag.duration;
@@ -259,8 +293,9 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
         }
       });
 
-      // IMPORTANT CHANGE: show real details (manifestLoadError / fragLoadError / HTTP codes)
       hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (isStale()) return;
+
         const details = data?.details || "unknown";
         const type = data?.type || "unknown";
         const fatal = data?.fatal ? "fatal" : "non-fatal";
@@ -277,16 +312,10 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
       });
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (isStale()) return;
         setIsLoading(false);
         video.muted = isMuted;
-
-        video
-          .play()
-          .then(() => {
-            setIsPlaying(true);
-            retryCountRef.current = 0;
-          })
-          .catch((err) => handleError(`Playback failed: ${String(err)}`));
+        void safePlay();
       });
 
       hls.attachMedia(video);
@@ -301,15 +330,10 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
       video.addEventListener(
         "loadedmetadata",
         () => {
+          if (isStale()) return;
           setIsLoading(false);
           video.muted = isMuted;
-          video
-            .play()
-            .then(() => {
-              setIsPlaying(true);
-              retryCountRef.current = 0;
-            })
-            .catch((err) => handleError(`Playback failed: ${String(err)}`));
+          void safePlay();
         },
         { once: true }
       );
@@ -341,7 +365,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
       retryCountRef.current += 1;
       setHasError(false);
       setErrorText("");
-      initializeStream();
+      void initializeStream();
     }, 2500);
 
     return () => clearTimeout(timer);
@@ -359,26 +383,27 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     else setComputedStatus("offline");
   }, [status, measuredBitrate]);
 
-  // Visibility observer (kept, but does NOT block startup anymore)
+  // Visibility observer (optional)
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
 
-    const observer = new IntersectionObserver(
-      ([entry]) => setIsVisible(entry.isIntersecting),
-      { threshold: 0.1 }
-    );
+    const observer = new IntersectionObserver(([entry]) => setIsVisible(entry.isIntersecting), {
+      threshold: 0.1,
+    });
 
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
 
-  // Start immediately on mount + whenever streamUrl changes/reloadKey changes
+  // Start on mount + whenever streamUrl / reloadKey changes
   useEffect(() => {
     retryCountRef.current = 0;
-    initializeStream();
+    void initializeStream();
 
     return () => {
+      // cancel any in-flight init
+      abortInitRef.current?.();
       teardownPlayer();
       if (manifestWatchRef.current) clearTimeout(manifestWatchRef.current);
       if (teardownTimerRef.current) clearTimeout(teardownTimerRef.current);
@@ -386,7 +411,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadKey, streamUrl]);
 
-  // Handle muted preference
+  // Load muted preference
   useEffect(() => {
     const savedMuted = localStorage.getItem("videoMuted") === "true";
     setIsMuted(savedMuted);
@@ -405,7 +430,10 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     video
       .play()
       .then(() => setIsPlaying(true))
-      .catch(() => setHasError(true));
+      .catch((err: any) => {
+        if (err?.name === "AbortError") return;
+        setHasError(true);
+      });
   };
 
   const toggleMute = () => {
@@ -451,29 +479,16 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
       <div
         className={cn(
           "absolute top-1 left-2 z-10 px-2 py-0.2 rounded text-xs font-semibold flex items-center gap-2",
-          status === "online"
-            ? "bg-green-700"
-            : status === "offline"
-            ? "bg-red-700"
-            : "bg-primary/90"
+          status === "online" ? "bg-green-700" : status === "offline" ? "bg-red-700" : "bg-primary/90"
         )}
       >
         <span className="text-[10px] text-white">{status ?? computedStatus}</span>
       </div>
 
-      <AudioMeter
-        leftLevel={audioLevels.left}
-        rightLevel={audioLevels.right}
-        className="absolute bottom-14 right-2 z-10"
-      />
+      <AudioMeter leftLevel={audioLevels.left} rightLevel={audioLevels.right} className="absolute bottom-14 right-2 z-10" />
 
       <div className="relative h-57 w-25">
-        <video
-          ref={videoRef}
-          className="w-full h-full object-cover bg-black"
-          playsInline
-          controls={false}
-        />
+        <video ref={videoRef} className="w-full h-full object-cover bg-black" playsInline controls={false} />
 
         {isLoading && (
           <div className="absolute inset-0 flex items-center justify-center bg-stream-bg">
@@ -490,7 +505,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
                 {errorText}
               </p>
             )}
-            <Button onClick={initializeStream} variant="outline" size="sm" className="mt-3">
+            <Button onClick={() => void initializeStream()} variant="outline" size="sm" className="mt-3">
               <RefreshCcw className="h-4 w-4 mr-2" />
               Retry
             </Button>
@@ -500,30 +515,15 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
         {showControls && !hasError && !isLoading && (
           <div className="absolute inset-0 bg-black/20 flex items-center justify-center">
             <div className="flex items-center gap-4 bg-black/60 rounded-lg px-4 py-2">
-              <Button
-                onClick={togglePlay}
-                variant="ghost"
-                size="sm"
-                className="text-white hover:bg-white/20"
-              >
+              <Button onClick={togglePlay} variant="ghost" size="sm" className="text-white hover:bg-white/20">
                 {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
               </Button>
 
-              <Button
-                onClick={toggleMute}
-                variant="ghost"
-                size="sm"
-                className="text-white hover:bg-white/20"
-              >
+              <Button onClick={toggleMute} variant="ghost" size="sm" className="text-white hover:bg-white/20">
                 {isMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
               </Button>
 
-              <Button
-                onClick={toggleFullscreen}
-                variant="ghost"
-                size="sm"
-                className="text-white hover:bg-white/20"
-              >
+              <Button onClick={toggleFullscreen} variant="ghost" size="sm" className="text-white hover:bg-white/20">
                 <Maximize className="h-4 w-4" />
               </Button>
 
