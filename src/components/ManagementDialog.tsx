@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState, useCallback } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -10,521 +10,431 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/use-toast";
 import { Switch } from "@/components/ui/switch";
-import { supabase } from "@/integrations/supabase/client";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+
+import { supabase } from "@/integrations/supabase/client";
 
 interface ManagementDialogProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
-type DbStreamRow = {
-  id: string;
-  user_id: string;
-  name: string;
-  url: string;
-  resolution: string | null;
-  color: string | null;
-  created_at?: string;
-};
-
-type StreamRow = {
-  id: string;
-  name: string;
-  url: string;
-  resolution: string;
-  user_id: string;
-};
-
-type ProfileRow = {
-  id: string;
+type DbProfile = {
+  id: string; // uuid
   username: string | null;
-  role: string | null;
-  roles: any | null;
-  created_at: string;
-  updated_at: string;
+  role: string | null; // 'admin' | 'user' ...
+  roles: Record<string, boolean> | null; // jsonb
 };
 
-type BitrateRow = {
-  id: number;
-  user_id: string;
-  stream_id: string | null;
-  stream_name: string;
-  stream_url: string;
-  bitrate_mbps: number;
-  created_at: string;
-};
+const allRoles = [
+  "add_streams",
+  "save_lists",
+  "load_lists",
+  "download_logs",
+  "delete_streams",
+] as const;
 
-function getInitialTheme(): "light" | "dark" {
-  try {
-    const saved = localStorage.getItem("theme");
-    if (saved === "dark" || saved === "light") return saved;
-  } catch {}
-  return "light";
-}
-function applyTheme(theme: "light" | "dark") {
-  const root = document.documentElement;
-  if (theme === "dark") root.classList.add("dark");
-  else root.classList.remove("dark");
-  try {
-    localStorage.setItem("theme", theme);
-  } catch {}
-}
-
-const isValidStreamUrl = (url: string): boolean => {
-  const u = url.trim().toLowerCase();
-  return (
-    u.startsWith("http://") ||
-    u.startsWith("https://") ||
-    u.startsWith("rtmp://") ||
-    u.startsWith("rtsp://") ||
-    u.startsWith("udp://") ||
-    u.includes(".m3u8")
-  );
-};
+type RoleKey = (typeof allRoles)[number];
 
 const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose }) => {
   const { toast } = useToast();
 
-  // ---------- Theme ----------
-  const [theme, setTheme] = useState<"light" | "dark">(getInitialTheme);
-  useEffect(() => applyTheme(theme), [theme]);
+  const [profiles, setProfiles] = useState<DbProfile[]>([]);
+  const [loading, setLoading] = useState(false);
 
-  // ---------- Tabs ----------
-  const [tab, setTab] = useState<"settings" | "db">("settings");
+  const [newUser, setNewUser] = useState({
+    email: "",
+    password: "",
+    role: "user" as "user" | "admin",
+    username: "",
+  });
 
-  // ---------- Password ----------
-  const [pw, setPw] = useState({ pass1: "", pass2: "", show: false });
-  const [pwBusy, setPwBusy] = useState(false);
+  const [confirmDeleteUserId, setConfirmDeleteUserId] = useState<string | null>(null);
 
-  // ---------- Streams ----------
-  const [streams, setStreams] = useState<StreamRow[]>([]);
-  const [streamsLoading, setStreamsLoading] = useState(false);
-
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editForm, setEditForm] = useState({ name: "", url: "", resolution: "480p" });
-  const [saveBusy, setSaveBusy] = useState(false);
-
-  // ---------- DB Viewer ----------
-  const [dbBusy, setDbBusy] = useState(false);
-  const [sessionEmail, setSessionEmail] = useState<string | null>(null);
-  const [myProfile, setMyProfile] = useState<ProfileRow | null>(null);
-  const [profiles, setProfiles] = useState<ProfileRow[]>([]);
-  const [bitrateLogs, setBitrateLogs] = useState<BitrateRow[]>([]);
-  const [counts, setCounts] = useState<{ profiles: number; streams: number; bitrate: number } | null>(null);
-
-  const sortedStreams = useMemo(() => {
-    const arr = [...streams];
-    arr.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  const sortedProfiles = useMemo(() => {
+    const arr = [...profiles];
+    arr.sort((a, b) => {
+      const ar = (a.role || "user").toLowerCase();
+      const br = (b.role || "user").toLowerCase();
+      if (ar !== br) return ar === "admin" ? -1 : 1;
+      return (a.username || "").localeCompare(b.username || "");
+    });
     return arr;
-  }, [streams]);
+  }, [profiles]);
 
-  const fetchStreams = useCallback(async () => {
-    setStreamsLoading(true);
+  const fetchProfiles = async () => {
+    setLoading(true);
     try {
+      // Only admins should be able to list all profiles (enforce via RLS or Edge Function if you prefer)
       const { data, error } = await supabase
-        .from("streams")
-        .select("id, user_id, name, url, resolution, color, created_at")
+        .from("profiles")
+        .select("id, username, role, roles")
         .order("created_at", { ascending: true });
 
       if (error) {
-        toast({ title: "Error loading streams", description: error.message, variant: "destructive" });
-        setStreams([]);
-        return;
-      }
-
-      const mapped: StreamRow[] = (data || []).map((row: DbStreamRow) => ({
-        id: row.id,
-        user_id: row.user_id,
-        name: row.name,
-        url: row.url,
-        resolution: row.resolution || "480p",
-      }));
-
-      setStreams(mapped);
-    } finally {
-      setStreamsLoading(false);
-    }
-  }, [toast]);
-
-  const refreshDbViewer = useCallback(async () => {
-    setDbBusy(true);
-    try {
-      // 1) session
-      const { data: sessionData, error: sessErr } = await supabase.auth.getSession();
-      if (sessErr) throw sessErr;
-      const user = sessionData.session?.user;
-      setSessionEmail(user?.email ?? null);
-
-      if (!user) {
-        toast({ title: "Not logged in", description: "No session found.", variant: "destructive" });
-        setMyProfile(null);
-        setProfiles([]);
-        setBitrateLogs([]);
-        setCounts(null);
-        return;
-      }
-
-      // 2) my profile
-      const { data: myP, error: myPErr } = await supabase
-        .from("profiles")
-        .select("id, username, role, roles, created_at, updated_at")
-        .eq("id", user.id)
-        .maybeSingle();
-
-      if (myPErr) {
-        toast({ title: "profiles read error", description: myPErr.message, variant: "destructive" });
-        setMyProfile(null);
-      } else {
-        setMyProfile((myP as ProfileRow) ?? null);
-      }
-
-      // 3) all profiles (if RLS allows)
-      const { data: allP, error: allPErr } = await supabase
-        .from("profiles")
-        .select("id, username, role, roles, created_at, updated_at")
-        .order("created_at", { ascending: false })
-        .limit(200);
-
-      if (allPErr) {
-        // If RLS blocks, show friendly info
+        console.error(error);
         toast({
-          title: "profiles table is protected",
-          description: allPErr.message,
+          title: "Error loading users",
+          description: error.message,
           variant: "destructive",
         });
         setProfiles([]);
-      } else {
-        setProfiles((allP as ProfileRow[]) ?? []);
+        return;
       }
 
-      // 4) bitrate logs (last 200)
-      const { data: br, error: brErr } = await supabase
-        .from("bitrate_logs")
-        .select("id, user_id, stream_id, stream_name, stream_url, bitrate_mbps, created_at")
-        .order("created_at", { ascending: false })
-        .limit(200);
-
-      if (brErr) {
-        toast({ title: "bitrate_logs read error", description: brErr.message, variant: "destructive" });
-        setBitrateLogs([]);
-      } else {
-        setBitrateLogs((br as BitrateRow[]) ?? []);
-      }
-
-      // 5) counts (cheap approximate with head + count)
-      const [pc, sc, bc] = await Promise.all([
-        supabase.from("profiles").select("id", { count: "exact", head: true }),
-        supabase.from("streams").select("id", { count: "exact", head: true }),
-        supabase.from("bitrate_logs").select("id", { count: "exact", head: true }),
-      ]);
-
-      setCounts({
-        profiles: pc.count ?? 0,
-        streams: sc.count ?? 0,
-        bitrate: bc.count ?? 0,
-      });
-    } catch (e: any) {
-      toast({ title: "DB check failed", description: e?.message || String(e), variant: "destructive" });
+      setProfiles((data || []) as DbProfile[]);
     } finally {
-      setDbBusy(false);
+      setLoading(false);
     }
-  }, [toast]);
+  };
 
   useEffect(() => {
-    if (!isOpen) return;
-    void fetchStreams();
-    void refreshDbViewer();
-  }, [isOpen, fetchStreams, refreshDbViewer]);
+    if (isOpen) void fetchProfiles();
+  }, [isOpen]);
 
-  const openEdit = (s: StreamRow) => {
-    setEditingId(s.id);
-    setEditForm({ name: s.name || "", url: s.url || "", resolution: s.resolution || "480p" });
-  };
+  const handleCreateUser = async () => {
+    const email = newUser.email.trim().toLowerCase();
+    const username = (newUser.username || "").trim();
+    const password = newUser.password;
 
-  const cancelEdit = () => {
-    setEditingId(null);
-    setEditForm({ name: "", url: "", resolution: "480p" });
-  };
-
-  const saveStream = async () => {
-    if (!editingId) return;
-    const name = editForm.name.trim() || "Stream";
-    const url = editForm.url.trim();
-
-    if (!isValidStreamUrl(url)) {
-      toast({ title: "Invalid URL", description: "Enter a valid stream URL.", variant: "destructive" });
-      return;
+    if (!email.includes("@")) {
+      return toast({
+        title: "Invalid email",
+        description: "Enter a valid email address.",
+        variant: "destructive",
+      });
+    }
+    if (password.length < 6) {
+      return toast({
+        title: "Password too short",
+        description: "Min 6 characters.",
+        variant: "destructive",
+      });
     }
 
-    setSaveBusy(true);
     try {
-      const { error } = await supabase
-        .from("streams")
-        .update({ name, url, resolution: editForm.resolution })
-        .eq("id", editingId);
+      // Create user via Edge Function (admin only)
+      const { data, error } = await supabase.functions.invoke("admin-users", {
+        body: {
+          action: "create",
+          email,
+          password,
+          role: newUser.role,
+          username: username || email,
+        },
+      });
 
       if (error) {
-        toast({ title: "Failed to update stream", description: error.message, variant: "destructive" });
+        console.error(error);
+        toast({
+          title: "Error creating user",
+          description: error.message,
+          variant: "destructive",
+        });
         return;
       }
 
-      setStreams((prev) => prev.map((s) => (s.id === editingId ? { ...s, name, url, resolution: editForm.resolution } : s)));
-      toast({ title: "Stream updated" });
-      cancelEdit();
-    } finally {
-      setSaveBusy(false);
+      if (data?.error) {
+        toast({
+          title: "Error creating user",
+          description: String(data.error),
+          variant: "destructive",
+        });
+        return;
+      }
+
+      toast({ title: "User created successfully" });
+      setNewUser({ email: "", password: "", role: "user", username: "" });
+      await fetchProfiles();
+    } catch (e: any) {
+      console.error(e);
+      toast({
+        title: "Error creating user",
+        description: String(e?.message || e),
+        variant: "destructive",
+      });
     }
   };
 
-  const deleteStream = async (id: string) => {
-    const confirmed = window.confirm("Delete this stream?");
-    if (!confirmed) return;
+  const handleTogglePermission = async (profile: DbProfile, key: RoleKey, value: boolean) => {
+    if ((profile.role || "user") === "admin") return; // admins always allowed
 
-    const { error } = await supabase.from("streams").delete().eq("id", id);
+    const nextRoles = { ...(profile.roles || {}) };
+    nextRoles[key] = value;
+
+    const { error } = await supabase
+      .from("profiles")
+      .update({ roles: nextRoles })
+      .eq("id", profile.id);
+
     if (error) {
-      toast({ title: "Failed to delete stream", description: error.message, variant: "destructive" });
+      toast({
+        title: "Error updating permission",
+        description: error.message,
+        variant: "destructive",
+      });
       return;
     }
 
-    setStreams((prev) => prev.filter((s) => s.id !== id));
-    toast({ title: "Stream deleted" });
+    toast({ title: "Permissions updated" });
+    // optimistic update
+    setProfiles((prev) =>
+      prev.map((p) => (p.id === profile.id ? { ...p, roles: nextRoles } : p))
+    );
   };
 
-  const changeMyPassword = async () => {
-    if (pw.pass1.length < 6) {
-      toast({ title: "Password too short", description: "Min 6 characters.", variant: "destructive" });
+  const handleChangePassword = async (profile: DbProfile) => {
+    const label = profile.username || profile.id;
+    const newPassword = prompt(`Enter new password for ${label}:`);
+    if (!newPassword) return;
+    if (newPassword.length < 6) {
+      return toast({
+        title: "Password too short",
+        description: "Password must be at least 6 characters long.",
+        variant: "destructive",
+      });
+    }
+
+    const { data, error } = await supabase.functions.invoke("admin-users", {
+      body: {
+        action: "set_password",
+        user_id: profile.id,
+        password: newPassword,
+      },
+    });
+
+    if (error) {
+      toast({
+        title: "Error updating password",
+        description: error.message,
+        variant: "destructive",
+      });
       return;
     }
-    if (pw.pass1 !== pw.pass2) {
-      toast({ title: "Passwords do not match", variant: "destructive" });
+    if (data?.error) {
+      toast({
+        title: "Error updating password",
+        description: String(data.error),
+        variant: "destructive",
+      });
       return;
     }
 
-    setPwBusy(true);
+    toast({ title: "Password updated successfully" });
+  };
+
+  const handleDeleteUser = async (userId: string) => {
     try {
-      const { error } = await supabase.auth.updateUser({ password: pw.pass1 });
+      const { data, error } = await supabase.functions.invoke("admin-users", {
+        body: { action: "delete", user_id: userId },
+      });
+
       if (error) {
-        toast({ title: "Failed to update password", description: error.message, variant: "destructive" });
+        toast({
+          title: "Error deleting user",
+          description: error.message,
+          variant: "destructive",
+        });
         return;
       }
-      toast({ title: "Password updated successfully" });
-      setPw({ pass1: "", pass2: "", show: false });
+      if (data?.error) {
+        toast({
+          title: "Error deleting user",
+          description: String(data.error),
+          variant: "destructive",
+        });
+        return;
+      }
+
+      toast({ title: "User deleted successfully" });
+      setConfirmDeleteUserId(null);
+      await fetchProfiles();
+    } catch (e: any) {
+      toast({
+        title: "Error deleting user",
+        description: String(e?.message || e),
+        variant: "destructive",
+      });
     } finally {
-      setPwBusy(false);
+      setConfirmDeleteUserId(null);
     }
   };
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-[980px] max-h-[85vh] overflow-y-auto">
-        <DialogHeader className="sticky top-0 bg-background z-10 pb-3">
-          <div className="flex items-center justify-between gap-3">
-            <DialogTitle>Settings</DialogTitle>
-
-            <div className="flex items-center gap-2">
-              <Button variant={tab === "settings" ? "default" : "outline"} size="sm" onClick={() => setTab("settings")}>
-                Settings
-              </Button>
-              <Button variant={tab === "db" ? "default" : "outline"} size="sm" onClick={() => setTab("db")}>
-                Database
-              </Button>
-
-              <div className="ml-3 flex items-center gap-2">
-                <Label htmlFor="theme-toggle" className="text-sm">Dark</Label>
-                <Switch id="theme-toggle" checked={theme === "dark"} onCheckedChange={(v) => setTheme(v ? "dark" : "light")} />
-              </div>
-            </div>
-          </div>
+      <DialogContent className="sm:max-w-[720px] max-h-[85vh] overflow-y-auto">
+        <DialogHeader className="sticky top-0 bg-background z-10">
+          <DialogTitle>User Management (Supabase)</DialogTitle>
         </DialogHeader>
 
-        {tab === "settings" ? (
-          <div className="grid gap-6 py-2">
-            {/* Change Password */}
-            <div className="rounded-xl border p-4">
-              <h3 className="text-lg font-semibold mb-3">Change Password</h3>
+        <div className="grid gap-4 py-4">
+          {/* Create User */}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void handleCreateUser();
+            }}
+            className="rounded-xl border p-4"
+          >
+            <h3 className="text-lg font-semibold mb-2">Create User</h3>
 
-              <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 items-center">
-                <Label className="sm:col-span-1">New password</Label>
-                <Input
-                  className="sm:col-span-3"
-                  type={pw.show ? "text" : "password"}
-                  value={pw.pass1}
-                  onChange={(e) => setPw((s) => ({ ...s, pass1: e.target.value }))}
-                  placeholder="Min 6 characters"
-                  autoComplete="new-password"
-                />
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 items-center">
+              <Label htmlFor="new-email" className="sm:col-span-1">
+                Email
+              </Label>
+              <Input
+                id="new-email"
+                className="sm:col-span-3"
+                value={newUser.email}
+                onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
+                placeholder="user@email.com"
+                autoComplete="off"
+                required
+              />
 
-                <Label className="sm:col-span-1">Confirm</Label>
-                <Input
-                  className="sm:col-span-3"
-                  type={pw.show ? "text" : "password"}
-                  value={pw.pass2}
-                  onChange={(e) => setPw((s) => ({ ...s, pass2: e.target.value }))}
-                  placeholder="Repeat password"
-                  autoComplete="new-password"
-                />
-              </div>
+              <Label htmlFor="new-username" className="sm:col-span-1">
+                Username
+              </Label>
+              <Input
+                id="new-username"
+                className="sm:col-span-3"
+                value={newUser.username}
+                onChange={(e) => setNewUser({ ...newUser, username: e.target.value })}
+                placeholder="Optional display name"
+                autoComplete="off"
+              />
 
-              <div className="mt-3 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <Switch id="showpw" checked={pw.show} onCheckedChange={(v) => setPw((s) => ({ ...s, show: !!v }))} />
-                  <Label htmlFor="showpw" className="text-sm">Show password</Label>
-                </div>
+              <Label htmlFor="new-password" className="sm:col-span-1">
+                Password
+              </Label>
+              <Input
+                id="new-password"
+                type="password"
+                className="sm:col-span-3"
+                value={newUser.password}
+                onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
+                placeholder="Minimum 6 characters"
+                required
+                minLength={6}
+              />
 
-                <Button onClick={() => void changeMyPassword()} disabled={pwBusy || pw.pass1.length < 6 || pw.pass1 !== pw.pass2}>
-                  Update Password
-                </Button>
-              </div>
+              <Label htmlFor="new-role" className="sm:col-span-1">
+                Role
+              </Label>
+              <select
+                id="new-role"
+                className="sm:col-span-3 h-10 rounded-md border bg-background px-3 text-sm"
+                value={newUser.role}
+                onChange={(e) => setNewUser({ ...newUser, role: e.target.value as "user" | "admin" })}
+              >
+                <option value="user">user</option>
+                <option value="admin">admin</option>
+              </select>
             </div>
 
-            {/* Manage Streams */}
-            <div className="rounded-xl border p-4">
-              <div className="flex items-center justify-between gap-3 mb-3">
-                <h3 className="text-lg font-semibold">Manage Streams</h3>
-                <Button variant="secondary" onClick={() => void fetchStreams()} disabled={streamsLoading}>
-                  Refresh
-                </Button>
-              </div>
-
-              {streamsLoading ? (
-                <div className="text-sm text-muted-foreground">Loading…</div>
-              ) : sortedStreams.length === 0 ? (
-                <div className="text-sm text-muted-foreground">No streams found.</div>
-              ) : (
-                <div className="grid gap-3">
-                  {sortedStreams.map((s) => {
-                    const isEditing = editingId === s.id;
-                    return (
-                      <div key={s.id} className="rounded-lg border p-3">
-                        {!isEditing ? (
-                          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                            <div className="min-w-0">
-                              <div className="font-semibold truncate">{s.name}</div>
-                              <div className="text-xs text-muted-foreground font-mono truncate">{s.url}</div>
-                              <div className="text-xs text-muted-foreground mt-1">Resolution: {s.resolution}</div>
-                            </div>
-
-                            <div className="flex items-center gap-2">
-                              <Button variant="outline" size="sm" onClick={() => openEdit(s)}>Edit</Button>
-                              <Button variant="destructive" size="sm" onClick={() => void deleteStream(s.id)}>Delete</Button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="grid gap-3">
-                            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-center">
-                              <Label className="sm:col-span-1">Name</Label>
-                              <Input className="sm:col-span-3" value={editForm.name} onChange={(e) => setEditForm((f) => ({ ...f, name: e.target.value }))} />
-
-                              <Label className="sm:col-span-1">URL</Label>
-                              <Input className="sm:col-span-3" value={editForm.url} onChange={(e) => setEditForm((f) => ({ ...f, url: e.target.value }))} />
-
-                              <Label className="sm:col-span-1">Resolution</Label>
-                              <div className="sm:col-span-3">
-                                <Select value={editForm.resolution} onValueChange={(v) => setEditForm((f) => ({ ...f, resolution: v }))}>
-                                  <SelectTrigger className="w-[160px] bg-input border-stream-border">
-                                    <SelectValue placeholder="Resolution" />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    <SelectItem value="480p">480p</SelectItem>
-                                    <SelectItem value="720p">720p</SelectItem>
-                                  </SelectContent>
-                                </Select>
-                              </div>
-                            </div>
-
-                            <div className="flex justify-end gap-2">
-                              <Button variant="outline" onClick={cancelEdit}>Cancel</Button>
-                              <Button onClick={() => void saveStream()} disabled={saveBusy}>Save</Button>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            <div className="text-xs text-muted-foreground">
-              Permissions removed — all users are treated as admin in this app.
-            </div>
-          </div>
-        ) : (
-          <div className="grid gap-4 py-2">
-            <div className="flex items-center justify-between">
-              <div className="text-sm text-muted-foreground">
-                Session: <span className="text-foreground font-medium">{sessionEmail ?? "—"}</span>
-              </div>
-              <Button onClick={() => void refreshDbViewer()} disabled={dbBusy}>
-                {dbBusy ? "Checking..." : "Refresh DB"}
+            <div className="mt-4 flex items-center gap-3">
+              <Button
+                type="submit"
+                disabled={newUser.email.trim().length < 5 || newUser.password.length < 6}
+              >
+                Create User
               </Button>
+              {loading && <span className="text-sm text-muted-foreground">Loading…</span>}
             </div>
+          </form>
 
-            {counts && (
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div className="rounded-lg border p-3">
-                  <div className="text-xs text-muted-foreground">Profiles</div>
-                  <div className="text-xl font-semibold">{counts.profiles}</div>
-                </div>
-                <div className="rounded-lg border p-3">
-                  <div className="text-xs text-muted-foreground">Streams</div>
-                  <div className="text-xl font-semibold">{counts.streams}</div>
-                </div>
-                <div className="rounded-lg border p-3">
-                  <div className="text-xs text-muted-foreground">Bitrate Logs</div>
-                  <div className="text-xl font-semibold">{counts.bitrate}</div>
-                </div>
-              </div>
-            )}
+          {/* Users List */}
+          <div className="mt-2">
+            <h3 className="text-lg font-semibold mb-3">Users and Permissions</h3>
 
-            <div className="rounded-xl border p-4">
-              <h3 className="text-lg font-semibold mb-2">My Profile Row</h3>
-              {!myProfile ? (
-                <div className="text-sm text-muted-foreground">No profile row found for this user.</div>
-              ) : (
-                <pre className="text-xs bg-muted/40 rounded-md p-3 overflow-x-auto">
-{JSON.stringify(myProfile, null, 2)}
-                </pre>
+            <div className="max-h-[60vh] overflow-y-auto pr-2">
+              {sortedProfiles.map((p) => {
+                const display = p.username || p.id;
+                const isAdmin = (p.role || "user") === "admin";
+                const roles = p.roles || {};
+
+                return (
+                  <div key={p.id} className="mb-4 p-4 border rounded-lg">
+                    <div className="flex justify-between items-center">
+                      <h4 className="font-bold">
+                        {display} ({p.role || "user"})
+                      </h4>
+
+                      <div className="flex gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void handleChangePassword(p)}
+                        >
+                          Change Password
+                        </Button>
+
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          disabled={isAdmin}
+                          onClick={() => setConfirmDeleteUserId(p.id)}
+                        >
+                          Delete User
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-3">
+                      {allRoles.map((rk) => (
+                        <div key={rk} className="flex items-center space-x-2">
+                          <Switch
+                            id={`${p.id}-${rk}`}
+                            checked={isAdmin ? true : Boolean(roles[rk])}
+                            onCheckedChange={(value) => void handleTogglePermission(p, rk, !!value)}
+                            disabled={isAdmin}
+                          />
+                          <Label htmlFor={`${p.id}-${rk}`}>{rk.replace(/_/g, " ")}</Label>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+
+              {sortedProfiles.length === 0 && (
+                <div className="text-sm text-muted-foreground p-4 border rounded-lg">
+                  No users found (or you don’t have permission).
+                </div>
               )}
-            </div>
-
-            <div className="rounded-xl border p-4">
-              <h3 className="text-lg font-semibold mb-2">Profiles (latest 200)</h3>
-              {profiles.length === 0 ? (
-                <div className="text-sm text-muted-foreground">
-                  No rows visible (maybe RLS blocks reading all users).
-                </div>
-              ) : (
-                <pre className="text-xs bg-muted/40 rounded-md p-3 overflow-x-auto">
-{JSON.stringify(profiles, null, 2)}
-                </pre>
-              )}
-            </div>
-
-            <div className="rounded-xl border p-4">
-              <h3 className="text-lg font-semibold mb-2">Bitrate Logs (latest 200)</h3>
-              {bitrateLogs.length === 0 ? (
-                <div className="text-sm text-muted-foreground">No logs found.</div>
-              ) : (
-                <pre className="text-xs bg-muted/40 rounded-md p-3 overflow-x-auto">
-{JSON.stringify(bitrateLogs, null, 2)}
-                </pre>
-              )}
-            </div>
-
-            <div className="text-xs text-muted-foreground">
-              If “Profiles (latest 200)” is empty but My Profile works → RLS is enabled for profiles.
-              You can either allow read-all, or keep it private.
             </div>
           </div>
-        )}
+        </div>
+
+        {/* Delete confirmation */}
+        <AlertDialog
+          open={!!confirmDeleteUserId}
+          onOpenChange={(open) => !open && setConfirmDeleteUserId(null)}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete user?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This action cannot be undone. The user account will be permanently removed.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={() => confirmDeleteUserId && void handleDeleteUser(confirmDeleteUserId)}>
+                Continue
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </DialogContent>
     </Dialog>
   );
