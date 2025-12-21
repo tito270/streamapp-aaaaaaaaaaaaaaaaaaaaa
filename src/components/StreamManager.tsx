@@ -502,7 +502,7 @@ export const StreamManager: React.FC = () => {
 
         {/* ✅ Welcome + Email */}
         <div className="flex items-center gap-4">
-          <div className="text-right">
+          <div className="text-left">
             <div className="text-3xl font-semibold text-foreground mt-[-2px]">
               {currentTime.toLocaleTimeString([], { hour12: false })}
             </div>
