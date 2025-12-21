@@ -55,6 +55,7 @@ export const StreamManager: React.FC = () => {
   const { toast } = useToast();
 
   const [user, setUser] = useState<UserPayload | null>(null);
+  const [userEmail, setUserEmail] = useState<string>("");
 
   const [streams, setStreams] = useState<Stream[]>([]);
   const [streamName, setStreamName] = useState("");
@@ -106,7 +107,21 @@ export const StreamManager: React.FC = () => {
 
   // --------- Auth user ----------
   useEffect(() => {
+    // keep your existing getUser() for username
     setUser(getUser());
+
+    // fetch email from Supabase (most reliable)
+    const loadEmail = async () => {
+      const { data, error } = await supabase.auth.getUser();
+      if (error) {
+        console.warn("supabase.auth.getUser error:", error.message);
+        setUserEmail("");
+        return;
+      }
+      setUserEmail(data.user?.email ?? "");
+    };
+
+    void loadEmail();
   }, []);
 
   // --------- Clock ----------
@@ -485,12 +500,29 @@ export const StreamManager: React.FC = () => {
           </div>
         </div>
 
+        {/* ✅ Welcome + Email */}
         <div className="flex items-center gap-4">
-          <p className="text-3xl font-semibold text-foreground mt-[-2px]">
-            {currentTime.toLocaleTimeString([], { hour12: false })}
-            <p>{currentTime.toISOString().slice(0, 10)}</p>
-            {user && <span className="text-sm text-muted-foreground">Welcome, {user.username}</span>}
-          </p>
+          <div className="text-right">
+            <div className="text-3xl font-semibold text-foreground mt-[-2px]">
+              {currentTime.toLocaleTimeString([], { hour12: false })}
+            </div>
+            <div className="text-sm text-muted-foreground">
+              {currentTime.toISOString().slice(0, 10)}
+            </div>
+
+            {user && (
+              <div className="mt-1">
+                <div className="text-sm text-muted-foreground">
+                  Welcome, <span className="text-foreground font-semibold">{user.username}</span>
+                </div>
+                {userEmail && (
+                  <div className="text-xs text-muted-foreground">
+                    Email: <span className="font-mono">{userEmail}</span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Add Stream Form */}
