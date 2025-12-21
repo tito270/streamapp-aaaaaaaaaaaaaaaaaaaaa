@@ -36,7 +36,9 @@ const Register: React.FC = () => {
   // If already logged in -> go home
   useEffect(() => {
     const checkAuth = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
       if (session) navigate("/");
     };
     void checkAuth();
@@ -107,7 +109,8 @@ const Register: React.FC = () => {
     if (/[^A-Za-z0-9]/.test(password)) strength++;
 
     if (strength <= 2) return { label: "Weak", color: "bg-destructive", width: "33%" };
-    if (strength <= 3) return { label: "Medium", color: "bg-[hsl(var(--stream-warning))]", width: "66%" };
+    if (strength <= 3)
+      return { label: "Medium", color: "bg-[hsl(var(--stream-warning))]", width: "66%" };
     return { label: "Strong", color: "bg-[hsl(var(--stream-success))]", width: "100%" };
   };
 
@@ -125,13 +128,16 @@ const Register: React.FC = () => {
       const cleanEmail = email.trim().toLowerCase();
       const cleanUsername = username.trim();
 
-      // IMPORTANT:
-      // With "Confirm email" turned OFF in Supabase, this should return a session immediately.
+      // ✅ IMPORTANT: ensure confirm email redirects back to your Lovable domain
+      // You must add this URL to Supabase Auth -> URL Configuration -> Additional Redirect URLs
+      const emailRedirectTo = `${window.location.origin}/auth/callback`;
+
       const { data, error: signUpError } = await supabase.auth.signUp({
         email: cleanEmail,
         password,
         options: {
           data: { username: cleanUsername },
+          emailRedirectTo,
         },
       });
 
@@ -145,7 +151,7 @@ const Register: React.FC = () => {
 
       // Create profile row (DB permissions storage)
       // Requires profiles table + RLS insert policy allowing auth.uid() = id
-      await supabase.from("profiles").upsert(
+      const { error: profileErr } = await supabase.from("profiles").upsert(
         {
           id: user.id,
           username: cleanUsername || cleanEmail,
@@ -154,6 +160,11 @@ const Register: React.FC = () => {
         },
         { onConflict: "id" }
       );
+
+      if (profileErr) {
+        // Don't fail signup if profile write is blocked; but log it for debugging
+        console.error("Profile upsert failed:", profileErr);
+      }
 
       // If confirm email is OFF => session exists => user is logged in
       if (data.session) {
@@ -165,7 +176,7 @@ const Register: React.FC = () => {
         return;
       }
 
-      // If confirm email is still ON by mistake
+      // If confirm email is ON => session is null => user must confirm email
       toast({
         title: "Registration Successful",
         description: "Please check your email to confirm your account.",
@@ -174,7 +185,10 @@ const Register: React.FC = () => {
     } catch (err: any) {
       const msg = err?.message || "Failed to register";
 
-      if (msg.toLowerCase().includes("signups not allowed") || msg.toLowerCase().includes("email signups are disabled")) {
+      if (
+        msg.toLowerCase().includes("signups not allowed") ||
+        msg.toLowerCase().includes("email signups are disabled")
+      ) {
         setError("Account creation is disabled. Please contact the administrator.");
       } else if (msg.toLowerCase().includes("already registered")) {
         setError("An account with this email already exists. Please login instead.");
@@ -196,10 +210,7 @@ const Register: React.FC = () => {
         {/* Banner */}
         <div className="absolute -top-12 -left-10 h-[74px] w-[370px]">
           <div className="relative h-full w-full">
-            <div
-              className="absolute inset-0"
-              style={{ backgroundColor: "#cfc79a", transform: "skewX(-24deg)" }}
-            />
+            <div className="absolute inset-0" style={{ backgroundColor: "#cfc79a", transform: "skewX(-24deg)" }} />
             <div
               className="absolute top-[18px] left-[208px] h-[52px] w-[185px]"
               style={{ backgroundColor: "#1b3240", opacity: 0.9, transform: "skewX(-24deg)" }}
@@ -227,7 +238,9 @@ const Register: React.FC = () => {
           <form onSubmit={handleRegister} className="space-y-4" noValidate>
             {/* Username */}
             <div>
-              <label htmlFor="username" className="sr-only">Username</label>
+              <label htmlFor="username" className="sr-only">
+                Username
+              </label>
               <div
                 className={`flex items-center gap-3 bg-input rounded px-3 py-2.5 transition-all focus-within:ring-2 focus-within:ring-primary ${
                   usernameError ? "ring-2 ring-destructive" : ""
@@ -257,7 +270,9 @@ const Register: React.FC = () => {
 
             {/* Email */}
             <div>
-              <label htmlFor="email" className="sr-only">Email</label>
+              <label htmlFor="email" className="sr-only">
+                Email
+              </label>
               <div
                 className={`flex items-center gap-3 bg-input rounded px-3 py-2.5 transition-all focus-within:ring-2 focus-within:ring-primary ${
                   emailError ? "ring-2 ring-destructive" : ""
@@ -287,7 +302,9 @@ const Register: React.FC = () => {
 
             {/* Password */}
             <div>
-              <label htmlFor="password" className="sr-only">Password</label>
+              <label htmlFor="password" className="sr-only">
+                Password
+              </label>
               <div
                 className={`flex items-center gap-3 bg-input rounded px-3 py-2.5 transition-all focus-within:ring-2 focus-within:ring-primary ${
                   passwordError ? "ring-2 ring-destructive" : ""
@@ -359,7 +376,9 @@ const Register: React.FC = () => {
 
             {/* Confirm Password */}
             <div>
-              <label htmlFor="confirmPassword" className="sr-only">Confirm Password</label>
+              <label htmlFor="confirmPassword" className="sr-only">
+                Confirm Password
+              </label>
               <div
                 className={`flex items-center gap-3 bg-input rounded px-3 py-2.5 transition-all focus-within:ring-2 focus-within:ring-primary ${
                   confirmPasswordError ? "ring-2 ring-destructive" : ""
