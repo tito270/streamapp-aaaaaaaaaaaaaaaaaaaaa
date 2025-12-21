@@ -11,463 +11,427 @@ import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 
+type ActivityLogRow = {
+  id: string;
+  created_at: string;
+  action: string; // e.g. add_stream, update_stream, delete_stream, password_change, load_list, save_list, login, logout
+  target_type: string; // e.g. stream, account, list
+  target_name: string | null; // e.g. "CCTV Entrance"
+  description: string | null; // short message
+  details: any | null; // jsonb
+  actor_user_id: string | null;
+  actor_email: string | null;
+};
+
 interface ManagementDialogProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
-type StreamRow = {
-  id: string;
-  user_id: string;
-  name: string;
-  url: string;
-  resolution: string | null;
-  color: string | null;
-  created_at?: string;
-};
-
-type AuditLogRow = {
-  id: string;
-  created_at: string;
-  user_id: string;
-  action: string;
-  entity_type: string | null;
-  entity_id: string | null;
-  details: any;
-};
-
-type LogRange = "1h" | "24h" | "all";
-
-const isoSince = (range: LogRange) => {
-  const now = Date.now();
-  if (range === "1h") return new Date(now - 60 * 60 * 1000).toISOString();
-  if (range === "24h") return new Date(now - 24 * 60 * 60 * 1000).toISOString();
-  return null;
-};
-
-const fmt = (d: string) => {
+// ---------- helpers ----------
+const fmtDateTime = (iso: string) => {
   try {
-    return new Date(d).toLocaleString();
+    const d = new Date(iso);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
+      d.getHours()
+    )}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   } catch {
-    return d;
+    return iso;
   }
+};
+
+const actionMeta = (action: string) => {
+  const a = (action || "").toLowerCase();
+
+  // ICON + LABEL + “dot” color (Tailwind)
+  if (a === "add_stream")
+    return { icon: "🟢", label: "Stream Added", dot: "bg-green-500" };
+  if (a === "update_stream")
+    return { icon: "🟡", label: "Stream Updated", dot: "bg-yellow-500" };
+  if (a === "delete_stream")
+    return { icon: "🔴", label: "Stream Deleted", dot: "bg-red-500" };
+  if (a === "password_change")
+    return { icon: "🔐", label: "Password Changed", dot: "bg-purple-500" };
+  if (a === "load_list")
+    return { icon: "📂", label: "List Loaded", dot: "bg-blue-500" };
+  if (a === "save_list")
+    return { icon: "💾", label: "List Saved", dot: "bg-cyan-500" };
+  if (a === "login")
+    return { icon: "🔑", label: "Login", dot: "bg-zinc-400" };
+  if (a === "logout")
+    return { icon: "🚪", label: "Logout", dot: "bg-zinc-400" };
+
+  return { icon: "📝", label: action || "Activity", dot: "bg-zinc-400" };
+};
+
+const prettyTarget = (row: ActivityLogRow) => {
+  if (row.target_name) return row.target_name;
+  const t = (row.target_type || "").toLowerCase();
+  if (t === "account") return "Account";
+  if (t === "stream") return "Stream";
+  if (t === "list") return "List";
+  return "—";
+};
+
+const prettyDesc = (row: ActivityLogRow) => {
+  if (row.description) return row.description;
+  // fallback from action
+  const a = (row.action || "").toLowerCase();
+  if (a === "add_stream") return "Stream URL added";
+  if (a === "update_stream") return "Stream updated";
+  if (a === "delete_stream") return "Stream removed";
+  if (a === "password_change") return "Security update";
+  if (a === "load_list") return "Streams imported";
+  if (a === "save_list") return "Saved locally";
+  return "—";
 };
 
 const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose }) => {
   const { toast } = useToast();
 
-  const [loading, setLoading] = useState(false);
-
-  // ---- Password form ----
+  // Password change form (current user)
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
+  const [pwLoading, setPwLoading] = useState(false);
 
-  // ---- Streams edit ----
-  const [streams, setStreams] = useState<StreamRow[]>([]);
-  const [editMap, setEditMap] = useState<Record<string, { name: string; url: string }>>({});
+  // Logs
+  const [logs, setLogs] = useState<ActivityLogRow[]>([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [filter, setFilter] = useState<"1h" | "24h" | "all">("24h");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
-  // ---- Logs ----
-  const [logs, setLogs] = useState<AuditLogRow[]>([]);
-  const [logRange, setLogRange] = useState<LogRange>("24h");
+  const sinceIso = useMemo(() => {
+    if (filter === "all") return null;
+    const ms = filter === "1h" ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+    return new Date(Date.now() - ms).toISOString();
+  }, [filter]);
 
-  const resetForms = () => {
-    setOldPassword("");
-    setNewPassword("");
-    setConfirmPassword("");
-  };
-
-  const logAction = async (action: string, entity_type?: string, entity_id?: string, details?: any) => {
-    const { data: u } = await supabase.auth.getUser();
-    const user = u.user;
-    if (!user) return;
-
-    const { error } = await supabase.from("audit_logs").insert({
-      user_id: user.id,
-      action,
-      entity_type: entity_type ?? null,
-      entity_id: entity_id ?? null,
-      details: details ?? null,
-    });
-
-    if (error) {
-      // Don’t block UX if logging fails
-      console.warn("audit_logs insert failed:", error.message);
-    }
-  };
-
-  const fetchStreams = async () => {
-    const { data: u } = await supabase.auth.getUser();
-    const user = u.user;
-    if (!user) {
-      setStreams([]);
-      return;
-    }
-
-    const { data, error } = await supabase
-      .from("streams")
-      .select("id,user_id,name,url,resolution,color,created_at")
-      .eq("user_id", user.id)
-      .order("created_at", { ascending: true });
-
-    if (error) {
-      toast({ title: "Failed to load streams", description: error.message, variant: "destructive" });
-      setStreams([]);
-      return;
-    }
-
-    const rows = (data || []) as StreamRow[];
-    setStreams(rows);
-
-    // init editMap
-    const next: Record<string, { name: string; url: string }> = {};
-    rows.forEach((s) => (next[s.id] = { name: s.name, url: s.url }));
-    setEditMap(next);
-  };
-
-  const fetchLogs = async (range: LogRange) => {
-    const { data: u } = await supabase.auth.getUser();
-    const user = u.user;
-    if (!user) {
-      setLogs([]);
-      return;
-    }
-
-    let q = supabase
-      .from("audit_logs")
-      .select("id,created_at,user_id,action,entity_type,entity_id,details")
-      .eq("user_id", user.id)
-      .order("created_at", { ascending: false })
-      .limit(300);
-
-    const since = isoSince(range);
-    if (since) q = q.gte("created_at", since);
-
-    const { data, error } = await q;
-    if (error) {
-      toast({ title: "Failed to load logs", description: error.message, variant: "destructive" });
-      setLogs([]);
-      return;
-    }
-
-    setLogs((data || []) as AuditLogRow[]);
-  };
-
-  useEffect(() => {
-    if (!isOpen) return;
-
-    setLoading(true);
-    (async () => {
-      try {
-        await fetchStreams();
-        await fetchLogs(logRange);
-      } finally {
-        setLoading(false);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen]);
-
-  useEffect(() => {
-    if (!isOpen) return;
-    void fetchLogs(logRange);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [logRange, isOpen]);
-
-  // ---- Password Change ----
-  const handleChangePassword = async () => {
-    if (!oldPassword || !newPassword || !confirmPassword) {
-      toast({ title: "Missing fields", description: "Fill old/new/confirm password.", variant: "destructive" });
-      return;
-    }
-    if (newPassword.length < 6) {
-      toast({ title: "Weak password", description: "New password must be at least 6 characters.", variant: "destructive" });
-      return;
-    }
-    if (newPassword !== confirmPassword) {
-      toast({ title: "Mismatch", description: "New password and confirm password do not match.", variant: "destructive" });
-      return;
-    }
-
-    setLoading(true);
+  const fetchLogs = async () => {
+    setLogsLoading(true);
     try {
-      const { data: u, error: userErr } = await supabase.auth.getUser();
-      if (userErr) throw userErr;
+      let q = supabase
+        .from("activity_logs")
+        .select(
+          "id, created_at, action, target_type, target_name, description, details, actor_user_id, actor_email"
+        )
+        .order("created_at", { ascending: false })
+        .limit(300);
 
-      const email = u.user?.email;
-      if (!email) {
-        toast({ title: "Missing email", description: "Cannot re-authenticate without email.", variant: "destructive" });
+      if (sinceIso) q = q.gte("created_at", sinceIso);
+
+      const { data, error } = await q;
+
+      if (error) {
+        toast({
+          title: "Error loading logs",
+          description: error.message,
+          variant: "destructive",
+        });
+        setLogs([]);
         return;
       }
 
-      // Re-auth with old password
+      setLogs((data || []) as ActivityLogRow[]);
+    } finally {
+      setLogsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isOpen) return;
+    void fetchLogs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, filter]);
+
+  const logTableRows = useMemo(() => {
+    return logs.map((r) => ({
+      ...r,
+      meta: actionMeta(r.action),
+    }));
+  }, [logs]);
+
+  // Change password: verify old password by re-auth then update
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!oldPassword || !newPassword || !confirmNewPassword) {
+      toast({
+        title: "Missing fields",
+        description: "Fill old password + new password + confirm.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (newPassword.length < 6) {
+      toast({
+        title: "Password too short",
+        description: "Minimum 6 characters.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (newPassword !== confirmNewPassword) {
+      toast({
+        title: "Passwords do not match",
+        description: "Confirm password must match the new password.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setPwLoading(true);
+    try {
+      const { data: userRes, error: userErr } = await supabase.auth.getUser();
+      if (userErr) throw userErr;
+
+      const email = userRes.user?.email;
+      if (!email) {
+        toast({
+          title: "Not logged in",
+          description: "Please login again.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // re-authenticate with old password
       const { error: signInErr } = await supabase.auth.signInWithPassword({
         email,
         password: oldPassword,
       });
-
       if (signInErr) {
-        toast({ title: "Old password incorrect", description: signInErr.message, variant: "destructive" });
+        toast({
+          title: "Old password incorrect",
+          description: "Please check your old password.",
+          variant: "destructive",
+        });
         return;
       }
 
-      // Update password
-      const { error: updErr } = await supabase.auth.updateUser({ password: newPassword });
-      if (updErr) {
-        toast({ title: "Failed to update password", description: updErr.message, variant: "destructive" });
-        return;
-      }
+      const { error: updErr } = await supabase.auth.updateUser({
+        password: newPassword,
+      });
+      if (updErr) throw updErr;
 
-      await logAction("password_change", "user", u.user?.id, { via: "settings_dialog" });
+      // Log action in DB (requires activity_logs table + insert policy)
+      const { data: u2 } = await supabase.auth.getUser();
+      const uid = u2.user?.id ?? null;
+      const uemail = u2.user?.email ?? null;
 
-      toast({ title: "Password updated", description: "Your password has been changed successfully." });
-      resetForms();
-      await fetchLogs(logRange);
-    } catch (e: any) {
+      await supabase.from("activity_logs").insert({
+        action: "password_change",
+        target_type: "account",
+        target_name: "Account",
+        description: "Password changed",
+        actor_user_id: uid,
+        actor_email: uemail,
+        details: { method: "self-service" },
+      });
+
+      toast({ title: "Password updated" });
+
+      setOldPassword("");
+      setNewPassword("");
+      setConfirmNewPassword("");
+
+      // refresh logs
+      void fetchLogs();
+    } catch (err: any) {
       toast({
-        title: "Error",
-        description: String(e?.message || e),
+        title: "Failed to update password",
+        description: err?.message || String(err),
         variant: "destructive",
       });
     } finally {
-      setLoading(false);
+      setPwLoading(false);
     }
   };
-
-  // ---- Stream Update ----
-  const handleSaveStream = async (streamId: string) => {
-    const draft = editMap[streamId];
-    if (!draft) return;
-
-    const name = (draft.name || "").trim();
-    const url = (draft.url || "").trim();
-
-    if (!name) {
-      toast({ title: "Invalid name", description: "Stream name is required.", variant: "destructive" });
-      return;
-    }
-    if (!url || !(url.startsWith("http://") || url.startsWith("https://") || url.includes(".m3u8"))) {
-      toast({
-        title: "Invalid URL",
-        description: "Use a valid HLS URL (.m3u8) or http(s) URL.",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    setLoading(true);
-    try {
-      const current = streams.find((s) => s.id === streamId);
-      if (!current) return;
-
-      const { error } = await supabase
-        .from("streams")
-        .update({ name, url })
-        .eq("id", streamId);
-
-      if (error) {
-        toast({ title: "Failed to update stream", description: error.message, variant: "destructive" });
-        return;
-      }
-
-      await logAction("update_stream", "stream", streamId, {
-        before: { name: current.name, url: current.url },
-        after: { name, url },
-      });
-
-      toast({ title: "Stream updated" });
-      await fetchStreams();
-      await fetchLogs(logRange);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const logSummary = useMemo(() => {
-    if (!logs.length) return "No logs yet.";
-    const latest = logs[0];
-    return `Last action: ${latest.action} (${fmt(latest.created_at)})`;
-  }, [logs]);
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-[900px] max-h-[85vh] overflow-y-auto">
+      <DialogContent className="sm:max-w-[920px] max-h-[85vh] overflow-y-auto">
         <DialogHeader className="sticky top-0 bg-background z-10 pb-2">
-          <DialogTitle>Settings</DialogTitle>
-          <p className="text-xs text-muted-foreground mt-1">{logSummary}</p>
+          <DialogTitle>Management</DialogTitle>
         </DialogHeader>
 
-        {/* PASSWORD */}
-        <div className="border rounded-xl p-4 space-y-3">
-          <h3 className="text-lg font-semibold">Change Password</h3>
+        <div className="grid gap-6 py-2">
+          {/* ---------------- Change Password (self) ---------------- */}
+          <form
+            onSubmit={handleChangePassword}
+            className="rounded-xl border p-4"
+          >
+            <h3 className="text-lg font-semibold mb-3">Change Password</h3>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div className="space-y-1">
-              <Label>Old password</Label>
-              <Input
-                type="password"
-                value={oldPassword}
-                onChange={(e) => setOldPassword(e.target.value)}
-                autoComplete="current-password"
-                disabled={loading}
-              />
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-center">
+              <div className="space-y-2">
+                <Label htmlFor="old-pwd">Old password</Label>
+                <Input
+                  id="old-pwd"
+                  type="password"
+                  value={oldPassword}
+                  onChange={(e) => setOldPassword(e.target.value)}
+                  autoComplete="current-password"
+                  disabled={pwLoading}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="new-pwd">New password</Label>
+                <Input
+                  id="new-pwd"
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  autoComplete="new-password"
+                  disabled={pwLoading}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="confirm-pwd">Confirm new password</Label>
+                <Input
+                  id="confirm-pwd"
+                  type="password"
+                  value={confirmNewPassword}
+                  onChange={(e) => setConfirmNewPassword(e.target.value)}
+                  autoComplete="new-password"
+                  disabled={pwLoading}
+                />
+              </div>
             </div>
 
-            <div className="space-y-1">
-              <Label>New password</Label>
-              <Input
-                type="password"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                autoComplete="new-password"
-                disabled={loading}
-              />
-            </div>
-
-            <div className="space-y-1">
-              <Label>Confirm new password</Label>
-              <Input
-                type="password"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                autoComplete="new-password"
-                disabled={loading}
-              />
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <Button onClick={handleChangePassword} disabled={loading}>
-              Save Password
-            </Button>
-            <Button variant="outline" onClick={resetForms} disabled={loading}>
-              Clear
-            </Button>
-          </div>
-
-          <p className="text-xs text-muted-foreground">
-            Note: Passwords are not stored in your database. We only log the action “password_change”.
-          </p>
-        </div>
-
-        {/* STREAM EDIT */}
-        <div className="border rounded-xl p-4 space-y-3">
-          <div className="flex items-center justify-between gap-3">
-            <h3 className="text-lg font-semibold">Edit Streams</h3>
-            <Button variant="outline" onClick={() => void fetchStreams()} disabled={loading}>
-              Refresh
-            </Button>
-          </div>
-
-          {streams.length === 0 ? (
-            <div className="text-sm text-muted-foreground">No streams found.</div>
-          ) : (
-            <div className="space-y-3">
-              {streams.map((s) => (
-                <div key={s.id} className="rounded-lg border p-3">
-                  <div className="grid grid-cols-1 sm:grid-cols-6 gap-2 items-center">
-                    <div className="sm:col-span-2">
-                      <Label className="text-xs">Name</Label>
-                      <Input
-                        value={editMap[s.id]?.name ?? s.name}
-                        onChange={(e) =>
-                          setEditMap((prev) => ({
-                            ...prev,
-                            [s.id]: { ...(prev[s.id] || { name: s.name, url: s.url }), name: e.target.value },
-                          }))
-                        }
-                        disabled={loading}
-                      />
-                    </div>
-
-                    <div className="sm:col-span-3">
-                      <Label className="text-xs">URL</Label>
-                      <Input
-                        value={editMap[s.id]?.url ?? s.url}
-                        onChange={(e) =>
-                          setEditMap((prev) => ({
-                            ...prev,
-                            [s.id]: { ...(prev[s.id] || { name: s.name, url: s.url }), url: e.target.value },
-                          }))
-                        }
-                        disabled={loading}
-                      />
-                    </div>
-
-                    <div className="sm:col-span-1 flex sm:justify-end gap-2 pt-6 sm:pt-0">
-                      <Button
-                        onClick={() => void handleSaveStream(s.id)}
-                        disabled={loading}
-                      >
-                        Save
-                      </Button>
-                    </div>
-                  </div>
-
-                  <div className="text-xs text-muted-foreground mt-2">
-                    ID: <span className="font-mono">{s.id}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* LOGS */}
-        <div className="border rounded-xl p-4 space-y-3">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <h3 className="text-lg font-semibold">Activity Logs</h3>
-
-            <div className="flex items-center gap-2">
-              <Label className="text-sm text-muted-foreground">Range:</Label>
-              <select
-                className="h-10 rounded-md border bg-background px-3 text-sm"
-                value={logRange}
-                onChange={(e) => setLogRange(e.target.value as LogRange)}
-                disabled={loading}
-              >
-                <option value="1h">Last 1 hour</option>
-                <option value="24h">Last 24 hours</option>
-                <option value="all">All</option>
-              </select>
-
-              <Button variant="outline" onClick={() => void fetchLogs(logRange)} disabled={loading}>
-                Refresh
+            <div className="mt-4 flex items-center gap-3">
+              <Button type="submit" disabled={pwLoading}>
+                {pwLoading ? "Updating..." : "Update Password"}
               </Button>
+              <span className="text-xs text-muted-foreground">
+                Tip: you will stay logged in after changing your password.
+              </span>
+            </div>
+          </form>
+
+          {/* ---------------- Activity Logs ---------------- */}
+          <div className="rounded-xl border p-4">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
+              <h3 className="text-lg font-semibold">Activity Logs</h3>
+
+              <div className="flex items-center gap-2">
+                <Label className="text-sm text-muted-foreground">Range:</Label>
+                <select
+                  className="h-10 rounded-md border bg-background px-3 text-sm"
+                  value={filter}
+                  onChange={(e) => setFilter(e.target.value as any)}
+                >
+                  <option value="1h">Last 1 hour</option>
+                  <option value="24h">Last 24 hours</option>
+                  <option value="all">All</option>
+                </select>
+
+                <Button variant="outline" onClick={() => void fetchLogs()} disabled={logsLoading}>
+                  Refresh
+                </Button>
+              </div>
+            </div>
+
+            {/* Timeline-style table */}
+            <div className="w-full overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="text-muted-foreground">
+                  <tr className="border-b">
+                    <th className="py-2 pr-3 text-left w-[44px]"> </th>
+                    <th className="py-2 pr-3 text-left min-w-[180px]">Action</th>
+                    <th className="py-2 pr-3 text-left min-w-[160px]">Target</th>
+                    <th className="py-2 pr-3 text-left">Description</th>
+                    <th className="py-2 text-left min-w-[180px]">Date &amp; Time</th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {logTableRows.map((row) => {
+                    const isExpanded = expandedId === row.id;
+                    const target = prettyTarget(row);
+                    const desc = prettyDesc(row);
+                    const dt = fmtDateTime(row.created_at);
+
+                    return (
+                      <React.Fragment key={row.id}>
+                        <tr
+                          className="border-b hover:bg-muted/40 transition-colors cursor-pointer"
+                          onClick={() => setExpandedId((cur) => (cur === row.id ? null : row.id))}
+                          title="Click to expand details"
+                        >
+                          <td className="py-3 pr-3 align-top">
+                            <div className="flex items-center gap-2">
+                              <span className="text-base">{row.meta.icon}</span>
+                              <span className={`inline-block h-2 w-2 rounded-full ${row.meta.dot}`} />
+                            </div>
+                          </td>
+
+                          <td className="py-3 pr-3 align-top">
+                            <div className="font-semibold text-foreground">{row.meta.label}</div>
+                            <div className="text-xs text-muted-foreground">
+                              {row.actor_email ? `by ${row.actor_email}` : ""}
+                            </div>
+                          </td>
+
+                          <td className="py-3 pr-3 align-top">
+                            <div className="font-medium">{target}</div>
+                            <div className="text-xs text-muted-foreground">
+                              {row.target_type ? row.target_type : ""}
+                            </div>
+                          </td>
+
+                          <td className="py-3 pr-3 align-top text-muted-foreground">
+                            {desc}
+                          </td>
+
+                          <td className="py-3 align-top text-muted-foreground">
+                            {dt}
+                          </td>
+                        </tr>
+
+                        {isExpanded && (
+                          <tr className="border-b bg-muted/20">
+                            <td />
+                            <td colSpan={4} className="py-3 pr-3">
+                              <div className="text-xs text-muted-foreground mb-2">
+                                Details (JSON)
+                              </div>
+                              <pre className="text-xs bg-background border rounded-md p-3 overflow-x-auto">
+                                {JSON.stringify(row.details ?? {}, null, 2)}
+                              </pre>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+
+                  {!logsLoading && logTableRows.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="py-6 text-center text-sm text-muted-foreground">
+                        No activity logs found for this range.
+                      </td>
+                    </tr>
+                  )}
+
+                  {logsLoading && (
+                    <tr>
+                      <td colSpan={5} className="py-6 text-center text-sm text-muted-foreground">
+                        Loading logs…
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="mt-3 text-xs text-muted-foreground">
+              Tip: click a row to expand technical details.
             </div>
           </div>
-
-          {logs.length === 0 ? (
-            <div className="text-sm text-muted-foreground">No logs found.</div>
-          ) : (
-            <div className="space-y-2">
-              {logs.map((l) => (
-                <div key={l.id} className="rounded-lg border p-3">
-                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-                    <div className="font-semibold">{l.action}</div>
-                    <div className="text-xs text-muted-foreground">{fmt(l.created_at)}</div>
-                  </div>
-
-                  <div className="text-xs text-muted-foreground mt-1">
-                    {l.entity_type ? (
-                      <>
-                        Entity: <span className="font-mono">{l.entity_type}</span>
-                        {l.entity_id ? <> / <span className="font-mono">{l.entity_id}</span></> : null}
-                      </>
-                    ) : (
-                      <>Entity: <span className="font-mono">—</span></>
-                    )}
-                  </div>
-
-                  {l.details ? (
-                    <pre className="mt-2 text-xs bg-muted/30 border rounded-md p-2 overflow-x-auto">
-{JSON.stringify(l.details, null, 2)}
-                    </pre>
-                  ) : null}
-                </div>
-              ))}
-            </div>
-          )}
         </div>
       </DialogContent>
     </Dialog>
