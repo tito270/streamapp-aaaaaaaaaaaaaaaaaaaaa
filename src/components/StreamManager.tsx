@@ -84,10 +84,42 @@ export const StreamManager: React.FC = () => {
   const [selectedGraphStream, setSelectedGraphStream] = useState<string>("all");
   const [isManagementOpen, setManagementOpen] = useState(false);
 
-  // ✅ NEW: download range selector for bitrate CSV
   const [downloadRange, setDownloadRange] = useState<DownloadRange>("24h");
 
   const normalizeUrl = (url: string) => url.trim().toLowerCase().replace(/\/$/, "");
+
+  // ✅ Activity Logs helper
+  const logActivity = useCallback(
+    async (payload: {
+      action: string;
+      target_type: string;
+      target_id?: string | null;
+      target_name?: string | null;
+      description?: string | null;
+      details?: Record<string, any>;
+    }) => {
+      try {
+        const { data } = await supabase.auth.getUser();
+        const authUser = data.user;
+        if (!authUser) return;
+
+        await supabase.from("activity_logs").insert({
+          actor_user_id: authUser.id,
+          actor_email: authUser.email,
+          action: payload.action,
+          target_type: payload.target_type,
+          target_id: payload.target_id ?? null,
+          target_name: payload.target_name ?? null,
+          description: payload.description ?? null,
+          details: payload.details ?? {},
+        });
+      } catch (e) {
+        // logs should never block UX
+        console.warn("logActivity failed:", e);
+      }
+    },
+    []
+  );
 
   // --------- Bitrate DB buffer ----------
   const bitrateBufferRef = useRef<BitrateLogRow[]>([]);
@@ -153,8 +185,8 @@ export const StreamManager: React.FC = () => {
     return (
       lowerUrl.startsWith("http://") ||
       lowerUrl.startsWith("https://") ||
-      lowerUrl.includes(".m3u8") || // ✅ HLS
-      lowerUrl.startsWith("rtmp://") || // (will show error in player now)
+      lowerUrl.includes(".m3u8") ||
+      lowerUrl.startsWith("rtmp://") ||
       lowerUrl.startsWith("rtsp://") ||
       lowerUrl.startsWith("udp://")
     );
@@ -302,11 +334,23 @@ export const StreamManager: React.FC = () => {
     setStreamName("");
     setStreamUrl("");
     toast({ title: "Stream Added", description: `(${streams.length + 1}/12)` });
-  }, [streamUrl, streams, streamName, resolution, toast]);
+
+    // ✅ LOG
+    void logActivity({
+      action: "add_stream",
+      target_type: "stream",
+      target_id: inserted.id,
+      target_name: inserted.name,
+      description: `Added stream: ${inserted.name}`,
+      details: { url: inserted.url, resolution: inserted.resolution },
+    });
+  }, [streamUrl, streams, streamName, resolution, toast, logActivity]);
 
   // --------- Remove stream ----------
   const removeStream = useCallback(
     async (streamId: string) => {
+      const stream = streams.find((s) => s.id === streamId);
+
       const { error } = await supabase.from("streams").delete().eq("id", streamId);
       if (error) {
         toast({ title: "Failed to delete stream", description: error.message, variant: "destructive" });
@@ -330,8 +374,18 @@ export const StreamManager: React.FC = () => {
       });
 
       toast({ title: "Stream Removed" });
+
+      // ✅ LOG
+      void logActivity({
+        action: "delete_stream",
+        target_type: "stream",
+        target_id: streamId,
+        target_name: stream?.name ?? null,
+        description: `Deleted stream: ${stream?.name ?? streamId}`,
+        details: { url: stream?.url },
+      });
     },
-    [toast]
+    [toast, streams, logActivity]
   );
 
   // --------- Save list to file ----------
@@ -352,6 +406,15 @@ export const StreamManager: React.FC = () => {
     URL.revokeObjectURL(url);
 
     toast({ title: "List Saved", description: `Saved '${listName.trim()}.txt'` });
+
+    // ✅ LOG
+    void logActivity({
+      action: "save_list",
+      target_type: "list",
+      target_name: listName.trim(),
+      description: `Saved stream list: ${listName.trim()}`,
+      details: { count: streams.length },
+    });
   };
 
   // --------- Load list from file ----------
@@ -423,11 +486,20 @@ export const StreamManager: React.FC = () => {
 
         setStreams((prev) => [...prev, ...inserted]);
         toast({ title: "List loaded", description: `Imported ${inserted.length} streams.` });
+
+        // ✅ LOG
+        void logActivity({
+          action: "load_list",
+          target_type: "list",
+          target_name: file.name,
+          description: `Loaded list from file: ${file.name}`,
+          details: { imported: inserted.length },
+        });
       } finally {
         event.target.value = "";
       }
     },
-    [streams, resolution, toast]
+    [streams, resolution, toast, logActivity]
   );
 
   // ✅ Helpers for bitrate formatting + CSV
@@ -440,7 +512,8 @@ export const StreamManager: React.FC = () => {
     return new Date(now - ms).toISOString();
   };
 
-  const makeRangeLabel = (range: DownloadRange) => (range === "1h" ? "last_1_hour" : range === "24h" ? "last_24_hours" : "all_time");
+  const makeRangeLabel = (range: DownloadRange) =>
+    range === "1h" ? "last_1_hour" : range === "24h" ? "last_24_hours" : "all_time";
 
   // --------- Download bitrate CSV (range selectable) ----------
   const downloadBitrateCsv = useCallback(async () => {
@@ -480,7 +553,6 @@ export const StreamManager: React.FC = () => {
       return;
     }
 
-    // ✅ bitrate displayed with 2 decimals + unit Mbps
     const header = ["created_at", "stream_name", "stream_url", "bitrate"];
     const escape = (v: unknown) => {
       const s = String(v ?? "");
@@ -493,14 +565,7 @@ export const StreamManager: React.FC = () => {
       "\n" +
       rows
         .map((r) =>
-          [
-            r.created_at,
-            r.stream_name,
-            r.stream_url,
-            formatMbps(Number(r.bitrate_mbps ?? 0)),
-          ]
-            .map(escape)
-            .join(",")
+          [r.created_at, r.stream_name, r.stream_url, formatMbps(Number(r.bitrate_mbps ?? 0))].map(escape).join(",")
         )
         .join("\n");
 
@@ -513,7 +578,16 @@ export const StreamManager: React.FC = () => {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, [downloadRange, toast]);
+
+    // ✅ LOG
+    void logActivity({
+      action: "download_bitrate_csv",
+      target_type: "report",
+      target_name: `bitrate_logs_${makeRangeLabel(downloadRange)}`,
+      description: `Downloaded bitrate CSV (${makeRangeLabel(downloadRange)})`,
+      details: { range: downloadRange, rows: rows.length },
+    });
+  }, [downloadRange, toast, logActivity]);
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") void addStream();
@@ -536,7 +610,6 @@ export const StreamManager: React.FC = () => {
       const v = latest[s.id];
       if (typeof v === "number" && isFinite(v)) total += v;
     });
-    // ✅ Keep 2 decimals and show Mbps in UI below
     return Math.round(total * 100) / 100;
   }, [allBitrateHistory, streams]);
 
@@ -548,7 +621,9 @@ export const StreamManager: React.FC = () => {
           <div className="flex items-center justify-start space-x-3 mb-2">
             <img src="/logo.png" alt="StreamWall Logo" className="h-14 w-14 mt-[-8px]" />
             <div>
-              <h1 className="text-4xl font-bold bg-gradient-primary text-justify bg-clip-text text-white">StreamWall</h1>
+              <h1 className="text-4xl font-bold bg-gradient-primary text-justify bg-clip-text text-white">
+                StreamWall
+              </h1>
               <p className="text-muted-foreground text-justify">All Streams. One Wall.</p>
               <p className="text-xs text-muted-foreground text-justify">Dev. By TMC MCR</p>
             </div>
@@ -643,7 +718,7 @@ export const StreamManager: React.FC = () => {
                   </Button>
                 </label>
 
-                {/* ✅ NEW: Select range + Download bitrate CSV */}
+                {/* ✅ Select range + Download bitrate CSV */}
                 <div className="flex items-center gap-2">
                   <Select value={downloadRange} onValueChange={(v) => setDownloadRange(v as DownloadRange)}>
                     <SelectTrigger className="w-[200px] bg-input border-stream-border">
@@ -675,7 +750,7 @@ export const StreamManager: React.FC = () => {
                   </Select>
                 </div>
 
-                <Button variant="outline" size="icon" onClick={() => setManagementOpen(true)} title="User Management">
+                <Button variant="outline" size="icon" onClick={() => setManagementOpen(true)} title="Management">
                   <Settings className="h-4 w-4" />
                 </Button>
 
@@ -684,6 +759,13 @@ export const StreamManager: React.FC = () => {
                   size="icon"
                   title="Logout"
                   onClick={async () => {
+                    // ✅ LOG logout attempt
+                    void logActivity({
+                      action: "logout",
+                      target_type: "auth",
+                      description: "User logged out",
+                    });
+
                     await logout();
                     window.location.href = "/login";
                   }}
@@ -718,7 +800,22 @@ export const StreamManager: React.FC = () => {
                   <Button
                     variant="destructive"
                     size="sm"
-                    onClick={() => setReloadSignals((rs) => ({ ...rs, [stream.id]: (rs[stream.id] || 0) + 1 }))}
+                    onClick={() => {
+                      setReloadSignals((rs) => ({
+                        ...rs,
+                        [stream.id]: (rs[stream.id] || 0) + 1,
+                      }));
+
+                      // ✅ LOG reload
+                      void logActivity({
+                        action: "reload_stream",
+                        target_type: "stream",
+                        target_id: stream.id,
+                        target_name: stream.name,
+                        description: `Reloaded stream: ${stream.name}`,
+                        details: { url: stream.url },
+                      });
+                    }}
                     title="Reload this stream"
                   >
                     <RotateCcw className="h-4 w-4" />
@@ -753,7 +850,6 @@ export const StreamManager: React.FC = () => {
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-baseline gap-3">
               <h2 className="text-2xl font-bold text-white">Real-time Bitrate Monitor:</h2>
-              {/* ✅ 2 decimals + unit */}
               <span className="text-lg font-semibold text-blue-500">{latestTotalBitrate.toFixed(2)} Mbps</span>
             </div>
 
