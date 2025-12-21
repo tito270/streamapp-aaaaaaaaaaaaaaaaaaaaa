@@ -7,9 +7,8 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/use-toast";
-import { supabase } from "@/integrations/supabase/client";
-
 import {
   Table,
   TableBody,
@@ -18,17 +17,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-
-import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from "@/components/ui/tabs";
-
-import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
-
 import {
   AlertDialog,
   AlertDialogAction,
@@ -39,6 +27,12 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { supabase } from "@/integrations/supabase/client";
+
+interface ManagementDialogProps {
+  isOpen: boolean;
+  onClose: () => void;
+}
 
 type DbStreamRow = {
   id: string;
@@ -47,194 +41,79 @@ type DbStreamRow = {
   url: string;
   resolution: string | null;
   color: string | null;
-  created_at?: string;
 };
 
-type ActivityLogRow = {
+type DbActivityLog = {
   id: string;
   created_at: string;
-  actor_user_id: string | null;
   actor_email: string | null;
   action: string;
   target_type: string | null;
-  target_id: string | null;
   target_name: string | null;
   description: string | null;
-  details: any | null;
+  // ✅ details intentionally NOT included / NOT shown
 };
 
-interface ManagementDialogProps {
-  isOpen: boolean;
-  onClose: () => void;
-}
-
-type LogRange = "1h" | "24h" | "all";
-
-const isoSince = (range: LogRange) => {
-  if (range === "all") return null;
-  const ms = range === "1h" ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
-  return new Date(Date.now() - ms).toISOString();
-};
-
-const fmtTime = (iso: string) =>
-  new Date(iso).toLocaleString([], {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-
-const safeJson = (v: any) => {
+const formatDateTime = (iso: string) => {
   try {
-    if (v == null) return "";
-    if (typeof v === "string") return v;
-    return JSON.stringify(v);
+    const d = new Date(iso);
+    // yyyy-mm-dd hh:mm:ss
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mi = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
   } catch {
-    return "";
+    return iso;
   }
 };
+
+const actionLabel = (a: string) => {
+  const x = (a || "").toLowerCase();
+  if (x === "add_stream") return "Add Stream";
+  if (x === "delete_stream") return "Delete Stream";
+  if (x === "edit_stream") return "Edit Stream";
+  if (x === "save_list") return "Save List";
+  if (x === "load_list") return "Load List";
+  if (x === "change_password") return "Change Password";
+  if (x === "login") return "Login";
+  if (x === "logout") return "Logout";
+  return a;
+};
+
+const safeTrim = (v: string) => v.trim().replace(/\s+/g, " ");
 
 const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose }) => {
   const { toast } = useToast();
 
-  // ---- tabs
-  const [tab, setTab] = useState<"streams" | "password" | "logs">("streams");
-
-  // ---- current user
-  const [userEmail, setUserEmail] = useState("");
-  const [userId, setUserId] = useState<string | null>(null);
-
-  // ---- streams
+  // --- Streams (edit) ---
   const [streams, setStreams] = useState<DbStreamRow[]>([]);
-  const [loadingStreams, setLoadingStreams] = useState(false);
+  const [streamsLoading, setStreamsLoading] = useState(false);
   const [editingStreamId, setEditingStreamId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editUrl, setEditUrl] = useState("");
+
   const [confirmDeleteStreamId, setConfirmDeleteStreamId] = useState<string | null>(null);
 
-  // ---- password
-  const [oldPassword, setOldPassword] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [savingPassword, setSavingPassword] = useState(false);
+  // --- Change password (current user) ---
+  const [pwOld, setPwOld] = useState("");
+  const [pwNew, setPwNew] = useState("");
+  const [pwConfirm, setPwConfirm] = useState("");
+  const [pwLoading, setPwLoading] = useState(false);
 
-  // ---- logs
-  const [logRange, setLogRange] = useState<LogRange>("24h");
-  const [logs, setLogs] = useState<ActivityLogRow[]>([]);
-  const [loadingLogs, setLoadingLogs] = useState(false);
+  // --- Activity logs (timeline table) ---
+  const [logs, setLogs] = useState<DbActivityLog[]>([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logsLimit, setLogsLimit] = useState(200);
 
-  const fetchMe = useCallback(async () => {
-    const { data, error } = await supabase.auth.getUser();
-    if (error) {
-      setUserEmail("");
-      setUserId(null);
-      return;
-    }
-    setUserEmail(data.user?.email ?? "");
-    setUserId(data.user?.id ?? null);
-  }, []);
-
-  const insertLog = useCallback(
-    async (row: Partial<ActivityLogRow>) => {
-      // If table/RLS is misconfigured, we silently ignore (no UI blocking)
-      try {
-        await supabase.from("activity_logs").insert({
-          actor_user_id: userId,
-          actor_email: userEmail || null,
-          action: row.action ?? "unknown",
-          target_type: row.target_type ?? null,
-          target_id: row.target_id ?? null,
-          target_name: row.target_name ?? null,
-          description: row.description ?? null,
-          details: row.details ?? null,
-        } as any);
-      } catch {
-        // ignore
-      }
-    },
-    [userEmail, userId]
-  );
-
-  const fetchStreams = useCallback(async () => {
-    setLoadingStreams(true);
-    try {
-      const { data, error } = await supabase
-        .from("streams")
-        .select("id, user_id, name, url, resolution, color, created_at")
-        .order("created_at", { ascending: true });
-
-      if (error) {
-        toast({
-          title: "Failed to load streams",
-          description: error.message,
-          variant: "destructive",
-        });
-        setStreams([]);
-        return;
-      }
-      setStreams((data || []) as DbStreamRow[]);
-    } finally {
-      setLoadingStreams(false);
-    }
-  }, [toast]);
-
-  const fetchLogs = useCallback(async () => {
-    setLoadingLogs(true);
-    try {
-      const since = isoSince(logRange);
-
-      let q = supabase
-        .from("activity_logs")
-        .select(
-          "id, created_at, actor_user_id, actor_email, action, target_type, target_id, target_name, description, details"
-        )
-        .order("created_at", { ascending: false })
-        .limit(250);
-
-      if (since) q = q.gte("created_at", since);
-
-      const { data, error } = await q;
-
-      if (error) {
-        // not destructive (RLS might block)
-        setLogs([]);
-        return;
-      }
-
-      setLogs((data || []) as ActivityLogRow[]);
-    } finally {
-      setLoadingLogs(false);
-    }
-  }, [logRange]);
-
-  // open dialog => load everything we need
-  useEffect(() => {
-    if (!isOpen) return;
-    void fetchMe().then(() => {
-      void fetchStreams();
-      void fetchLogs();
-    });
-  }, [isOpen, fetchMe, fetchStreams, fetchLogs]);
-
-  // range change => refresh logs
-  useEffect(() => {
-    if (!isOpen) return;
-    void fetchLogs();
-  }, [logRange, isOpen, fetchLogs]);
-
-  const startEditStream = (s: DbStreamRow) => {
-    setEditingStreamId(s.id);
-    setEditName(s.name || "");
-    setEditUrl(s.url || "");
-  };
-
-  const cancelEdit = () => {
-    setEditingStreamId(null);
-    setEditName("");
-    setEditUrl("");
-  };
+  const canSavePw = useMemo(() => {
+    if (!pwOld || !pwNew || !pwConfirm) return false;
+    if (pwNew.length < 6) return false;
+    if (pwNew !== pwConfirm) return false;
+    return true;
+  }, [pwOld, pwNew, pwConfirm]);
 
   const isValidStreamUrl = (url: string) => {
     const u = url.trim().toLowerCase();
@@ -248,498 +127,460 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose }) 
     );
   };
 
-  const saveEditStream = async () => {
-    if (!editingStreamId) return;
+  const getActorEmail = async (): Promise<string> => {
+    // Prefer auth user email (most reliable)
+    const { data, error } = await supabase.auth.getUser();
+    if (!error) return data.user?.email ?? "unknown";
+    return "unknown";
+  };
 
-    const name = editName.trim();
-    const url = editUrl.trim();
+  const insertActivity = useCallback(
+    async (action: string, target_type: string | null, target_name: string | null, description: string | null) => {
+      try {
+        const actor_email = await getActorEmail();
+        await supabase.from("activity_logs").insert({
+          actor_email,
+          action,
+          target_type,
+          target_name,
+          description,
+        });
+      } catch (e) {
+        // non-blocking
+        console.warn("activity_logs insert failed:", e);
+      }
+    },
+    []
+  );
+
+  const fetchStreams = useCallback(async () => {
+    setStreamsLoading(true);
+    try {
+      const { data: authData } = await supabase.auth.getUser();
+      const authUser = authData?.user;
+      if (!authUser) {
+        setStreams([]);
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("streams")
+        .select("id, user_id, name, url, resolution, color")
+        .order("created_at", { ascending: true });
+
+      if (error) {
+        toast({ title: "Failed to load streams", description: error.message, variant: "destructive" });
+        setStreams([]);
+        return;
+      }
+
+      setStreams((data || []) as DbStreamRow[]);
+    } finally {
+      setStreamsLoading(false);
+    }
+  }, [toast]);
+
+  const fetchLogs = useCallback(async () => {
+    setLogsLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from("activity_logs")
+        // ✅ details intentionally NOT selected
+        .select("id, created_at, actor_email, action, target_type, target_name, description")
+        .order("created_at", { ascending: false })
+        .limit(logsLimit);
+
+      if (error) {
+        toast({ title: "Failed to load activity logs", description: error.message, variant: "destructive" });
+        setLogs([]);
+        return;
+      }
+
+      setLogs((data || []) as DbActivityLog[]);
+    } finally {
+      setLogsLoading(false);
+    }
+  }, [logsLimit, toast]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    void fetchStreams();
+    void fetchLogs();
+
+    // reset state each open (optional)
+    setEditingStreamId(null);
+    setConfirmDeleteStreamId(null);
+    setPwOld("");
+    setPwNew("");
+    setPwConfirm("");
+  }, [isOpen, fetchStreams, fetchLogs]);
+
+  const beginEditStream = (s: DbStreamRow) => {
+    setEditingStreamId(s.id);
+    setEditName(s.name ?? "");
+    setEditUrl(s.url ?? "");
+  };
+
+  const cancelEditStream = () => {
+    setEditingStreamId(null);
+    setEditName("");
+    setEditUrl("");
+  };
+
+  const saveStreamEdit = async () => {
+    const streamId = editingStreamId;
+    if (!streamId) return;
+
+    const name = safeTrim(editName);
+    const url = safeTrim(editUrl);
 
     if (!name) {
-      toast({ title: "Name is required", variant: "destructive" });
+      toast({ title: "Invalid name", description: "Stream name is required.", variant: "destructive" });
       return;
     }
     if (!url || !isValidStreamUrl(url)) {
       toast({
         title: "Invalid URL",
-        description: "Enter a valid URL (HLS .m3u8 / HTTP / RTSP / RTMP / UDP).",
+        description: "Enter a valid stream URL (HLS .m3u8 / HTTP / RTSP / RTMP / UDP).",
         variant: "destructive",
       });
       return;
     }
 
-    const old = streams.find((x) => x.id === editingStreamId);
+    const existing = streams.find((x) => x.id === streamId);
+    const before = existing ? `${existing.name} — ${existing.url}` : "stream";
 
     const { error } = await supabase
       .from("streams")
       .update({ name, url })
-      .eq("id", editingStreamId);
+      .eq("id", streamId);
 
     if (error) {
-      toast({ title: "Update failed", description: error.message, variant: "destructive" });
+      toast({ title: "Failed to update stream", description: error.message, variant: "destructive" });
       return;
     }
 
-    toast({ title: "Stream updated" });
-
-    await insertLog({
-      action: "stream_update",
-      target_type: "stream",
-      target_id: editingStreamId,
-      target_name: name,
-      description: `Updated stream "${old?.name ?? name}"`,
-      details: {
-        before: { name: old?.name, url: old?.url },
-        after: { name, url },
-      },
-    });
-
-    setStreams((prev) =>
-      prev.map((s) => (s.id === editingStreamId ? { ...s, name, url } : s))
+    await insertActivity(
+      "edit_stream",
+      "stream",
+      name,
+      `Updated stream: ${before} -> ${name} — ${url}`
     );
-    cancelEdit();
+
+    toast({ title: "Stream updated" });
+    cancelEditStream();
+    await fetchStreams();
+    await fetchLogs();
   };
 
   const deleteStream = async (streamId: string) => {
-    const s = streams.find((x) => x.id === streamId);
+    const target = streams.find((s) => s.id === streamId);
+    const targetName = target?.name ?? "stream";
+
     const { error } = await supabase.from("streams").delete().eq("id", streamId);
 
     if (error) {
-      toast({ title: "Delete failed", description: error.message, variant: "destructive" });
+      toast({ title: "Failed to delete stream", description: error.message, variant: "destructive" });
       return;
     }
 
+    await insertActivity("delete_stream", "stream", targetName, `Deleted stream: ${targetName}`);
     toast({ title: "Stream deleted" });
 
-    await insertLog({
-      action: "stream_delete",
-      target_type: "stream",
-      target_id: streamId,
-      target_name: s?.name ?? null,
-      description: `Deleted stream "${s?.name ?? streamId}"`,
-      details: { name: s?.name, url: s?.url },
-    });
-
-    setStreams((prev) => prev.filter((x) => x.id !== streamId));
     setConfirmDeleteStreamId(null);
+    await fetchStreams();
+    await fetchLogs();
   };
 
-  // ---- Password change (old/new/confirm)
-  // NOTE: Supabase does NOT allow verifying old password client-side directly.
-  // We verify old password by attempting signIn with current email + old password.
-  const changePassword = async () => {
-    const email = userEmail.trim().toLowerCase();
-    if (!email) {
-      toast({ title: "Missing email", description: "Please login again.", variant: "destructive" });
-      return;
-    }
+  /**
+   * ✅ Change password with old password verification:
+   * Supabase requires re-auth to validate the old password.
+   * We sign in with current email + old password, then update password.
+   */
+  const handleChangePassword = async () => {
+    if (!canSavePw) return;
 
-    if (newPassword.length < 6) {
-      toast({ title: "Password too short", description: "Min 6 characters.", variant: "destructive" });
-      return;
-    }
-    if (newPassword !== confirmPassword) {
-      toast({ title: "Passwords do not match", variant: "destructive" });
-      return;
-    }
-    if (!oldPassword) {
-      toast({ title: "Old password is required", variant: "destructive" });
-      return;
-    }
-
-    setSavingPassword(true);
+    setPwLoading(true);
     try {
-      // verify old password
-      const { error: verifyErr } = await supabase.auth.signInWithPassword({
+      const { data: userRes, error: userErr } = await supabase.auth.getUser();
+      if (userErr || !userRes.user) {
+        toast({ title: "Not logged in", description: "Please login again.", variant: "destructive" });
+        return;
+      }
+
+      const email = userRes.user.email;
+      if (!email) {
+        toast({ title: "Missing email", description: "Your user has no email.", variant: "destructive" });
+        return;
+      }
+
+      // Re-auth by signing in with old password (validates it)
+      const { error: signInErr } = await supabase.auth.signInWithPassword({
         email,
-        password: oldPassword,
+        password: pwOld,
       });
 
-      if (verifyErr) {
-        toast({ title: "Old password is incorrect", description: verifyErr.message, variant: "destructive" });
+      if (signInErr) {
+        toast({ title: "Old password incorrect", description: signInErr.message, variant: "destructive" });
         return;
       }
 
-      // update to new password
-      const { error: updErr } = await supabase.auth.updateUser({ password: newPassword });
+      // Update password
+      const { error: updErr } = await supabase.auth.updateUser({ password: pwNew });
       if (updErr) {
-        toast({ title: "Failed to update password", description: updErr.message, variant: "destructive" });
+        toast({ title: "Failed to change password", description: updErr.message, variant: "destructive" });
         return;
       }
 
-      toast({ title: "Password updated successfully" });
+      await insertActivity("change_password", "user", email, "User changed password");
 
-      await insertLog({
-        action: "password_change",
-        target_type: "auth",
-        target_id: userId,
-        target_name: userEmail,
-        description: "Password changed",
-        details: { via: "ManagementDialog" },
-      });
-
-      setOldPassword("");
-      setNewPassword("");
-      setConfirmPassword("");
-
-      // refresh logs tab quickly
-      void fetchLogs();
+      toast({ title: "Password updated" });
+      setPwOld("");
+      setPwNew("");
+      setPwConfirm("");
+      await fetchLogs();
     } finally {
-      setSavingPassword(false);
+      setPwLoading(false);
     }
   };
 
-  // small badge for action types
-  const actionBadge = (action: string) => {
-    const a = (action || "").toLowerCase();
-    if (a.includes("delete")) return <Badge variant="destructive">DELETE</Badge>;
-    if (a.includes("update") || a.includes("edit")) return <Badge variant="secondary">UPDATE</Badge>;
-    if (a.includes("add") || a.includes("create")) return <Badge>ADD</Badge>;
-    if (a.includes("load") || a.includes("import")) return <Badge variant="outline">LOAD</Badge>;
-    if (a.includes("save") || a.includes("export")) return <Badge variant="outline">SAVE</Badge>;
-    if (a.includes("password")) return <Badge variant="secondary">SECURITY</Badge>;
-    return <Badge variant="outline">INFO</Badge>;
-  };
-
-  const logsEmptyText = useMemo(() => {
-    if (loadingLogs) return "Loading…";
-    return "No activity logs yet.";
-  }, [loadingLogs]);
+  const logsRangeLabel = useMemo(() => {
+    return logsLimit === 50 ? "Last 50" : logsLimit === 200 ? "Last 200" : "Last 500";
+  }, [logsLimit]);
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="sm:max-w-[980px] max-h-[88vh] overflow-y-auto">
         <DialogHeader className="sticky top-0 bg-background z-10 pb-2">
-          <DialogTitle>Settings & Activity</DialogTitle>
-        </DialogHeader>
+          <div className="flex items-center justify-between gap-3">
+            <DialogTitle>Settings</DialogTitle>
 
-        <Tabs value={tab} onValueChange={(v) => setTab(v as any)} className="w-full">
-          <TabsList className="grid w-full grid-cols-3">
-            <TabsTrigger value="streams">Streams</TabsTrigger>
-            <TabsTrigger value="password">Change Password</TabsTrigger>
-            <TabsTrigger value="logs">Activity Logs</TabsTrigger>
-          </TabsList>
+            <div className="flex items-center gap-2">
+              <Label className="text-xs text-muted-foreground">Logs:</Label>
+              <select
+                className="h-9 rounded-md border bg-background px-3 text-sm"
+                value={String(logsLimit)}
+                onChange={(e) => setLogsLimit(Number(e.target.value) as any)}
+              >
+                <option value="50">Last 50</option>
+                <option value="200">Last 200</option>
+                <option value="500">Last 500</option>
+              </select>
 
-          {/* ---------- Streams Tab ---------- */}
-          <TabsContent value="streams" className="pt-4">
-            <div className="flex items-center justify-between gap-3 mb-3">
-              <div>
-                <div className="text-sm text-muted-foreground">
-                  Edit stream <b>Name</b> or <b>Link</b> here. Changes apply immediately.
-                </div>
-              </div>
-              <Button variant="outline" onClick={() => void fetchStreams()} disabled={loadingStreams}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  void fetchStreams();
+                  void fetchLogs();
+                }}
+              >
                 Refresh
               </Button>
             </div>
+          </div>
+        </DialogHeader>
 
-            <div className="border rounded-xl overflow-hidden">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="w-[220px]">Name</TableHead>
-                    <TableHead>URL</TableHead>
-                    <TableHead className="w-[120px]">Resolution</TableHead>
-                    <TableHead className="w-[220px] text-right">Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
+        <div className="grid gap-6 py-2">
+          {/* ✅ Change Password */}
+          <section className="rounded-xl border p-4">
+            <h3 className="text-lg font-semibold mb-3">Change Password</h3>
 
-                <TableBody>
-                  {streams.map((s) => {
-                    const isEditing = editingStreamId === s.id;
-
-                    return (
-                      <TableRow key={s.id}>
-                        <TableCell className="align-top">
-                          {isEditing ? (
-                            <Input
-                              value={editName}
-                              onChange={(e) => setEditName(e.target.value)}
-                              placeholder="Stream name"
-                            />
-                          ) : (
-                            <div className="font-medium">{s.name}</div>
-                          )}
-                        </TableCell>
-
-                        <TableCell className="align-top">
-                          {isEditing ? (
-                            <Input
-                              value={editUrl}
-                              onChange={(e) => setEditUrl(e.target.value)}
-                              placeholder="https://...m3u8"
-                            />
-                          ) : (
-                            <div className="text-xs font-mono text-muted-foreground break-all">
-                              {s.url}
-                            </div>
-                          )}
-                        </TableCell>
-
-                        <TableCell className="align-top">
-                          <span className="text-sm text-muted-foreground">{s.resolution ?? "—"}</span>
-                        </TableCell>
-
-                        <TableCell className="text-right align-top">
-                          {isEditing ? (
-                            <div className="flex justify-end gap-2">
-                              <Button variant="outline" onClick={cancelEdit}>
-                                Cancel
-                              </Button>
-                              <Button onClick={() => void saveEditStream()}>
-                                Save
-                              </Button>
-                            </div>
-                          ) : (
-                            <div className="flex justify-end gap-2">
-                              <Button
-                                variant="outline"
-                                onClick={() => startEditStream(s)}
-                              >
-                                Edit
-                              </Button>
-
-                              <Button
-                                variant="destructive"
-                                onClick={() => setConfirmDeleteStreamId(s.id)}
-                              >
-                                Delete
-                              </Button>
-                            </div>
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
-
-                  {!loadingStreams && streams.length === 0 && (
-                    <TableRow>
-                      <TableCell colSpan={4} className="text-sm text-muted-foreground py-6">
-                        No streams found.
-                      </TableCell>
-                    </TableRow>
-                  )}
-
-                  {loadingStreams && (
-                    <TableRow>
-                      <TableCell colSpan={4} className="text-sm text-muted-foreground py-6">
-                        Loading…
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </div>
-
-            {/* Delete stream confirm */}
-            <AlertDialog
-              open={!!confirmDeleteStreamId}
-              onOpenChange={(open) => !open && setConfirmDeleteStreamId(null)}
-            >
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>Delete stream?</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    This will remove the stream from the database. It cannot be undone.
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>Cancel</AlertDialogCancel>
-                  <AlertDialogAction
-                    onClick={() =>
-                      confirmDeleteStreamId && void deleteStream(confirmDeleteStreamId)
-                    }
-                  >
-                    Continue
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-          </TabsContent>
-
-          {/* ---------- Password Tab ---------- */}
-          <TabsContent value="password" className="pt-4">
-            <div className="rounded-xl border p-4">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <div className="text-lg font-semibold">Change password</div>
-                  <div className="text-sm text-muted-foreground">
-                    Enter your old password, then your new password.
-                  </div>
-                  {userEmail && (
-                    <div className="text-xs text-muted-foreground mt-1">
-                      Account: <span className="font-mono">{userEmail}</span>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="grid gap-3 mt-4 max-w-[520px]">
-                <div className="grid gap-1.5">
-                  <Label>Old password</Label>
-                  <Input
-                    type="password"
-                    value={oldPassword}
-                    onChange={(e) => setOldPassword(e.target.value)}
-                    placeholder="••••••••"
-                    autoComplete="current-password"
-                  />
-                </div>
-
-                <div className="grid gap-1.5">
-                  <Label>New password</Label>
-                  <Input
-                    type="password"
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    placeholder="Min 6 characters"
-                    autoComplete="new-password"
-                  />
-                </div>
-
-                <div className="grid gap-1.5">
-                  <Label>Confirm new password</Label>
-                  <Input
-                    type="password"
-                    value={confirmPassword}
-                    onChange={(e) => setConfirmPassword(e.target.value)}
-                    placeholder="Repeat new password"
-                    autoComplete="new-password"
-                  />
-                </div>
-
-                <div className="flex items-center gap-2 mt-2">
-                  <Button onClick={() => void changePassword()} disabled={savingPassword}>
-                    {savingPassword ? "Saving..." : "Save password"}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      setOldPassword("");
-                      setNewPassword("");
-                      setConfirmPassword("");
-                    }}
-                    disabled={savingPassword}
-                  >
-                    Clear
-                  </Button>
-                </div>
-              </div>
-            </div>
-          </TabsContent>
-
-          {/* ---------- Logs Tab ---------- */}
-          <TabsContent value="logs" className="pt-4">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div>
-                <div className="text-lg font-semibold">Activity Logs — Timeline Style (Table Format)</div>
-                <div className="text-sm text-muted-foreground">
-                  Latest actions done in the app (add/delete/load/save/edit/password…).
-                </div>
+                <Label htmlFor="pw-old">Old password</Label>
+                <Input
+                  id="pw-old"
+                  type="password"
+                  value={pwOld}
+                  onChange={(e) => setPwOld(e.target.value)}
+                  placeholder="Old password"
+                  autoComplete="current-password"
+                />
+              </div>
+
+              <div>
+                <Label htmlFor="pw-new">New password</Label>
+                <Input
+                  id="pw-new"
+                  type="password"
+                  value={pwNew}
+                  onChange={(e) => setPwNew(e.target.value)}
+                  placeholder="New password (min 6)"
+                  autoComplete="new-password"
+                />
+              </div>
+
+              <div>
+                <Label htmlFor="pw-confirm">Confirm</Label>
+                <Input
+                  id="pw-confirm"
+                  type="password"
+                  value={pwConfirm}
+                  onChange={(e) => setPwConfirm(e.target.value)}
+                  placeholder="Confirm new password"
+                  autoComplete="new-password"
+                />
+              </div>
+            </div>
+
+            <div className="mt-4 flex items-center gap-3">
+              <Button onClick={() => void handleChangePassword()} disabled={!canSavePw || pwLoading}>
+                {pwLoading ? "Saving..." : "Save Password"}
+              </Button>
+              {!canSavePw && (
+                <span className="text-xs text-muted-foreground">
+                  New password must match and be at least 6 characters.
+                </span>
+              )}
+            </div>
+          </section>
+
+          {/* ✅ Streams (edit name/url) */}
+          <section className="rounded-xl border p-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">Edit Streams</h3>
+              {streamsLoading && <span className="text-sm text-muted-foreground">Loading…</span>}
+            </div>
+
+            <div className="mt-3 space-y-3">
+              {streams.length === 0 ? (
+                <div className="text-sm text-muted-foreground">No streams found.</div>
+              ) : (
+                streams.map((s) => {
+                  const isEditing = editingStreamId === s.id;
+
+                  return (
+                    <div key={s.id} className="rounded-lg border p-3">
+                      {!isEditing ? (
+                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="font-semibold truncate">{s.name}</div>
+                            <div className="text-xs text-muted-foreground font-mono truncate">{s.url}</div>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <Button variant="outline" size="sm" onClick={() => beginEditStream(s)}>
+                              Edit
+                            </Button>
+                            <Button
+                              variant="destructive"
+                              size="sm"
+                              onClick={() => setConfirmDeleteStreamId(s.id)}
+                            >
+                              Delete
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div>
+                              <Label>Name</Label>
+                              <Input value={editName} onChange={(e) => setEditName(e.target.value)} />
+                            </div>
+                            <div>
+                              <Label>URL</Label>
+                              <Input value={editUrl} onChange={(e) => setEditUrl(e.target.value)} />
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <Button onClick={() => void saveStreamEdit()}>Save</Button>
+                            <Button variant="outline" onClick={cancelEditStream}>
+                              Cancel
+                            </Button>
+                          </div>
+
+                          <p className="text-xs text-muted-foreground">
+                            Tip: For best results in Lovable without backend, use HLS (.m3u8) streams.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </section>
+
+          {/* ✅ Activity Logs (Timeline Style - Table) */}
+          <section className="rounded-xl border p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-semibold">Activity Logs</h3>
+                <p className="text-xs text-muted-foreground">Timeline style (Table Format) — {logsRangeLabel}</p>
               </div>
 
               <div className="flex items-center gap-2">
-                <select
-                  className="h-10 rounded-md border bg-background px-3 text-sm"
-                  value={logRange}
-                  onChange={(e) => setLogRange(e.target.value as LogRange)}
-                >
-                  <option value="1h">Last 1 hour</option>
-                  <option value="24h">Last 24 hours</option>
-                  <option value="all">All time</option>
-                </select>
-
-                <Button variant="outline" onClick={() => void fetchLogs()} disabled={loadingLogs}>
-                  Refresh
+                {logsLoading && <span className="text-sm text-muted-foreground">Loading…</span>}
+                <Button variant="outline" size="sm" onClick={() => void fetchLogs()}>
+                  Refresh Logs
                 </Button>
               </div>
             </div>
 
-            <div className="border rounded-xl overflow-hidden">
+            <div className="mt-3 rounded-lg border overflow-hidden">
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="w-[180px]">Time</TableHead>
-                    <TableHead className="w-[160px]">User</TableHead>
-                    <TableHead className="w-[150px]">Action</TableHead>
+                    <TableHead className="w-[190px]">Time</TableHead>
+                    <TableHead className="w-[220px]">User</TableHead>
+                    <TableHead className="w-[180px]">Action</TableHead>
                     <TableHead className="w-[220px]">Target</TableHead>
                     <TableHead>Description</TableHead>
-                    <TableHead className="w-[220px]">Details</TableHead>
+                    {/* ✅ Details column removed */}
                   </TableRow>
                 </TableHeader>
 
                 <TableBody>
-                  {logs.map((l) => (
-                    <TableRow key={l.id}>
-                      <TableCell className="align-top text-xs text-muted-foreground">
-                        {fmtTime(l.created_at)}
-                      </TableCell>
-
-                      <TableCell className="align-top">
-                        <div className="text-sm font-medium">
-                          {l.actor_email || "Unknown"}
-                        </div>
-                      </TableCell>
-
-                      <TableCell className="align-top">
-                        <div className="flex items-center gap-2">
-                          {actionBadge(l.action)}
-                          <span className="text-xs text-muted-foreground font-mono">
-                            {l.action}
-                          </span>
-                        </div>
-                      </TableCell>
-
-                      <TableCell className="align-top">
-                        <div className="text-sm">
-                          <span className="text-muted-foreground">{l.target_type ?? "—"}</span>
-                          {l.target_name ? (
-                            <div className="font-medium">{l.target_name}</div>
-                          ) : l.target_id ? (
-                            <div className="text-xs font-mono text-muted-foreground break-all">
-                              {l.target_id}
-                            </div>
-                          ) : (
-                            <div className="text-xs text-muted-foreground">—</div>
-                          )}
-                        </div>
-                      </TableCell>
-
-                      <TableCell className="align-top text-sm">
-                        {l.description ?? "—"}
-                      </TableCell>
-
-                      <TableCell className="align-top">
-                        <div className="text-xs font-mono text-muted-foreground break-all">
-                          {safeJson(l.details)}
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-
-                  {!loadingLogs && logs.length === 0 && (
+                  {logs.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={6} className="text-sm text-muted-foreground py-6">
-                        {logsEmptyText}
+                      <TableCell colSpan={5} className="text-sm text-muted-foreground py-6 text-center">
+                        No activity logs yet.
                       </TableCell>
                     </TableRow>
-                  )}
-
-                  {loadingLogs && (
-                    <TableRow>
-                      <TableCell colSpan={6} className="text-sm text-muted-foreground py-6">
-                        Loading…
-                      </TableCell>
-                    </TableRow>
+                  ) : (
+                    logs.map((l) => (
+                      <TableRow key={l.id}>
+                        <TableCell className="text-xs font-mono">{formatDateTime(l.created_at)}</TableCell>
+                        <TableCell className="text-sm">{l.actor_email || "unknown"}</TableCell>
+                        <TableCell className="text-sm font-semibold">{actionLabel(l.action)}</TableCell>
+                        <TableCell className="text-sm">
+                          {(l.target_type || "—") + (l.target_name ? ` — ${l.target_name}` : "")}
+                        </TableCell>
+                        <TableCell className="text-sm">{l.description || "—"}</TableCell>
+                      </TableRow>
+                    ))
                   )}
                 </TableBody>
               </Table>
             </div>
+          </section>
+        </div>
 
-            <div className="text-xs text-muted-foreground mt-2">
-              Tip: If logs are empty, check RLS policies on <span className="font-mono">activity_logs</span>.
-            </div>
-          </TabsContent>
-        </Tabs>
+        {/* Delete stream confirmation */}
+        <AlertDialog
+          open={!!confirmDeleteStreamId}
+          onOpenChange={(open) => !open && setConfirmDeleteStreamId(null)}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete stream?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This action cannot be undone. The stream will be permanently removed.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() => confirmDeleteStreamId && void deleteStream(confirmDeleteStreamId)}
+              >
+                Continue
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </DialogContent>
     </Dialog>
   );
