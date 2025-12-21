@@ -63,6 +63,30 @@ type BitrateLogRow = {
 
 type DownloadRange = "1h" | "24h" | "all";
 
+// --------- Activity Logs (no "details" column) ----------
+type ActivityAction =
+  | "login"
+  | "logout"
+  | "add_stream"
+  | "edit_stream"
+  | "delete_stream"
+  | "save_list"
+  | "load_list"
+  | "download_bitrate_csv"
+  | "change_password";
+
+type ActivityLogInsert = {
+  actor_id?: string | null;
+  actor_email?: string | null;
+  action: ActivityAction;
+  target_type?: string | null;
+  target_id?: string | null;
+  target_name?: string | null;
+  description?: string | null;
+};
+
+const safeTrim = (v: unknown) => String(v ?? "").trim();
+
 export const StreamManager: React.FC = () => {
   const { toast } = useToast();
 
@@ -84,38 +108,57 @@ export const StreamManager: React.FC = () => {
   const [selectedGraphStream, setSelectedGraphStream] = useState<string>("all");
   const [isManagementOpen, setManagementOpen] = useState(false);
 
+  // Download range selector for bitrate CSV
   const [downloadRange, setDownloadRange] = useState<DownloadRange>("24h");
 
   const normalizeUrl = (url: string) => url.trim().toLowerCase().replace(/\/$/, "");
 
-  // ✅ Activity Logs helper
-  const logActivity = useCallback(
-    async (payload: {
-      action: string;
-      target_type: string;
-      target_id?: string | null;
-      target_name?: string | null;
-      description?: string | null;
-      details?: Record<string, any>;
-    }) => {
-      try {
-        const { data } = await supabase.auth.getUser();
-        const authUser = data.user;
-        if (!authUser) return;
+  // ---------- Helpers ----------
+  const formatMbps = (v: number) => `${Number.isFinite(v) ? v.toFixed(2) : "0.00"} Mbps`;
 
-        await supabase.from("activity_logs").insert({
-          actor_user_id: authUser.id,
-          actor_email: authUser.email,
-          action: payload.action,
-          target_type: payload.target_type,
-          target_id: payload.target_id ?? null,
-          target_name: payload.target_name ?? null,
-          description: payload.description ?? null,
-          details: payload.details ?? {},
-        });
+  const getSinceIso = (range: DownloadRange): string | null => {
+    if (range === "all") return null;
+    const now = Date.now();
+    const ms = range === "1h" ? 1 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+    return new Date(now - ms).toISOString();
+  };
+
+  const makeRangeLabel = (range: DownloadRange) =>
+    range === "1h" ? "last_1_hour" : range === "24h" ? "last_24_hours" : "all_time";
+
+  // ---------- Activity Logs insert (best-effort, never blocks UI) ----------
+  const logActivity = useCallback(
+    async (row: Omit<ActivityLogInsert, "actor_email" | "actor_id"> & { actor_id?: string | null; actor_email?: string | null }) => {
+      try {
+        // Get actor email/id if not provided
+        let actor_email = row.actor_email ?? null;
+        let actor_id = row.actor_id ?? null;
+
+        if (!actor_email || !actor_id) {
+          const { data, error } = await supabase.auth.getUser();
+          if (!error) {
+            actor_email = actor_email ?? data.user?.email ?? null;
+            actor_id = actor_id ?? data.user?.id ?? null;
+          }
+        }
+
+        const payload: ActivityLogInsert = {
+          actor_id,
+          actor_email,
+          action: row.action,
+          target_type: row.target_type ?? null,
+          target_id: row.target_id ?? null,
+          target_name: row.target_name ?? null,
+          description: row.description ?? null,
+        };
+
+        const { error } = await supabase.from("activity_logs").insert(payload);
+        if (error) {
+          // Don’t toast; just log. This avoids spamming UI if RLS is wrong.
+          console.warn("activity_logs insert blocked/failed:", error.message);
+        }
       } catch (e) {
-        // logs should never block UX
-        console.warn("logActivity failed:", e);
+        console.warn("activity_logs insert exception:", e);
       }
     },
     []
@@ -185,7 +228,7 @@ export const StreamManager: React.FC = () => {
     return (
       lowerUrl.startsWith("http://") ||
       lowerUrl.startsWith("https://") ||
-      lowerUrl.includes(".m3u8") ||
+      lowerUrl.includes(".m3u8") || // HLS
       lowerUrl.startsWith("rtmp://") ||
       lowerUrl.startsWith("rtsp://") ||
       lowerUrl.startsWith("udp://")
@@ -274,7 +317,7 @@ export const StreamManager: React.FC = () => {
 
   // --------- Add stream ----------
   const addStream = useCallback(async () => {
-    const urlToAdd = streamUrl.trim();
+    const urlToAdd = safeTrim(streamUrl);
     if (!urlToAdd || !isValidStreamUrl(urlToAdd)) {
       toast({
         title: "Invalid Stream URL",
@@ -295,7 +338,7 @@ export const StreamManager: React.FC = () => {
       return;
     }
 
-    const nameToAdd = streamName.trim() || `Stream ${streams.length + 1}`;
+    const nameToAdd = safeTrim(streamName) || `Stream ${streams.length + 1}`;
     const color = streamColors[streams.length % streamColors.length];
 
     const { data: authData } = await supabase.auth.getUser();
@@ -333,16 +376,16 @@ export const StreamManager: React.FC = () => {
     setStreams((prev) => [...prev, inserted]);
     setStreamName("");
     setStreamUrl("");
+
     toast({ title: "Stream Added", description: `(${streams.length + 1}/12)` });
 
-    // ✅ LOG
+    // Activity log
     void logActivity({
       action: "add_stream",
       target_type: "stream",
       target_id: inserted.id,
       target_name: inserted.name,
-      description: `Added stream: ${inserted.name}`,
-      details: { url: inserted.url, resolution: inserted.resolution },
+      description: "Stream added",
     });
   }, [streamUrl, streams, streamName, resolution, toast, logActivity]);
 
@@ -375,47 +418,44 @@ export const StreamManager: React.FC = () => {
 
       toast({ title: "Stream Removed" });
 
-      // ✅ LOG
       void logActivity({
         action: "delete_stream",
         target_type: "stream",
         target_id: streamId,
         target_name: stream?.name ?? null,
-        description: `Deleted stream: ${stream?.name ?? streamId}`,
-        details: { url: stream?.url },
+        description: "Stream deleted",
       });
     },
     [toast, streams, logActivity]
   );
 
   // --------- Save list to file ----------
-  const saveListToFile = () => {
+  const saveListToFile = useCallback(() => {
     const listName = prompt("Enter a name for your stream list:");
     if (!listName || listName.trim() === "") return;
 
-    const content = `ListName:${listName.trim()}\n` + streams.map((s) => `${s.name};${s.url}`).join("\n");
+    const name = listName.trim();
+    const content = `ListName:${name}\n` + streams.map((s) => `${s.name};${s.url}`).join("\n");
 
     const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${listName.trim()}.txt`;
+    a.download = `${name}.txt`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
 
-    toast({ title: "List Saved", description: `Saved '${listName.trim()}.txt'` });
+    toast({ title: "List Saved", description: `Saved '${name}.txt'` });
 
-    // ✅ LOG
     void logActivity({
       action: "save_list",
       target_type: "list",
-      target_name: listName.trim(),
-      description: `Saved stream list: ${listName.trim()}`,
-      details: { count: streams.length },
+      target_name: name,
+      description: "List saved (downloaded)",
     });
-  };
+  }, [streams, toast, logActivity]);
 
   // --------- Load list from file ----------
   const loadListFromFile = useCallback(
@@ -469,7 +509,10 @@ export const StreamManager: React.FC = () => {
           color: streamColors[(streams.length + i) % streamColors.length],
         }));
 
-        const { data, error } = await supabase.from("streams").insert(rows).select("id, name, url, resolution, color");
+        const { data, error } = await supabase
+          .from("streams")
+          .insert(rows)
+          .select("id, name, url, resolution, color");
 
         if (error) {
           toast({ title: "Failed to import list", description: error.message, variant: "destructive" });
@@ -487,13 +530,11 @@ export const StreamManager: React.FC = () => {
         setStreams((prev) => [...prev, ...inserted]);
         toast({ title: "List loaded", description: `Imported ${inserted.length} streams.` });
 
-        // ✅ LOG
         void logActivity({
           action: "load_list",
           target_type: "list",
           target_name: file.name,
-          description: `Loaded list from file: ${file.name}`,
-          details: { imported: inserted.length },
+          description: `List loaded from file (${inserted.length} streams imported)`,
         });
       } finally {
         event.target.value = "";
@@ -501,19 +542,6 @@ export const StreamManager: React.FC = () => {
     },
     [streams, resolution, toast, logActivity]
   );
-
-  // ✅ Helpers for bitrate formatting + CSV
-  const formatMbps = (v: number) => `${v.toFixed(2)} Mbps`;
-
-  const getSinceIso = (range: DownloadRange): string | null => {
-    if (range === "all") return null;
-    const now = Date.now();
-    const ms = range === "1h" ? 1 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
-    return new Date(now - ms).toISOString();
-  };
-
-  const makeRangeLabel = (range: DownloadRange) =>
-    range === "1h" ? "last_1_hour" : range === "24h" ? "last_24_hours" : "all_time";
 
   // --------- Download bitrate CSV (range selectable) ----------
   const downloadBitrateCsv = useCallback(async () => {
@@ -553,6 +581,7 @@ export const StreamManager: React.FC = () => {
       return;
     }
 
+    // bitrate displayed with 2 decimals + unit Mbps
     const header = ["created_at", "stream_name", "stream_url", "bitrate"];
     const escape = (v: unknown) => {
       const s = String(v ?? "");
@@ -564,9 +593,7 @@ export const StreamManager: React.FC = () => {
       header.join(",") +
       "\n" +
       rows
-        .map((r) =>
-          [r.created_at, r.stream_name, r.stream_url, formatMbps(Number(r.bitrate_mbps ?? 0))].map(escape).join(",")
-        )
+        .map((r) => [r.created_at, r.stream_name, r.stream_url, formatMbps(Number(r.bitrate_mbps ?? 0))].map(escape).join(","))
         .join("\n");
 
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
@@ -579,13 +606,11 @@ export const StreamManager: React.FC = () => {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
 
-    // ✅ LOG
     void logActivity({
       action: "download_bitrate_csv",
-      target_type: "report",
-      target_name: `bitrate_logs_${makeRangeLabel(downloadRange)}`,
-      description: `Downloaded bitrate CSV (${makeRangeLabel(downloadRange)})`,
-      details: { range: downloadRange, rows: rows.length },
+      target_type: "bitrate_logs",
+      target_name: makeRangeLabel(downloadRange),
+      description: "Downloaded bitrate CSV",
     });
   }, [downloadRange, toast, logActivity]);
 
@@ -621,16 +646,14 @@ export const StreamManager: React.FC = () => {
           <div className="flex items-center justify-start space-x-3 mb-2">
             <img src="/logo.png" alt="StreamWall Logo" className="h-14 w-14 mt-[-8px]" />
             <div>
-              <h1 className="text-4xl font-bold bg-gradient-primary text-justify bg-clip-text text-white">
-                StreamWall
-              </h1>
+              <h1 className="text-4xl font-bold bg-gradient-primary text-justify bg-clip-text text-white">StreamWall</h1>
               <p className="text-muted-foreground text-justify">All Streams. One Wall.</p>
               <p className="text-xs text-muted-foreground text-justify">Dev. By TMC MCR</p>
             </div>
           </div>
         </div>
 
-        {/* ✅ Welcome + Email */}
+        {/* Welcome + Email */}
         <div className="flex items-center gap-4">
           <div className="text-left">
             <div className="text-3xl font-semibold text-foreground mt-[-2px]">
@@ -706,19 +729,13 @@ export const StreamManager: React.FC = () => {
 
                 {/* LOAD LIST (LOCAL MACHINE) */}
                 <label htmlFor="load-list-file" className="inline-block">
-                  <input
-                    id="load-list-file"
-                    type="file"
-                    accept=".txt"
-                    style={{ display: "none" }}
-                    onChange={loadListFromFile}
-                  />
+                  <input id="load-list-file" type="file" accept=".txt" style={{ display: "none" }} onChange={loadListFromFile} />
                   <Button asChild variant="outline">
                     <span>Load List</span>
                   </Button>
                 </label>
 
-                {/* ✅ Select range + Download bitrate CSV */}
+                {/* Select range + Download bitrate CSV */}
                 <div className="flex items-center gap-2">
                   <Select value={downloadRange} onValueChange={(v) => setDownloadRange(v as DownloadRange)}>
                     <SelectTrigger className="w-[200px] bg-input border-stream-border">
@@ -750,7 +767,7 @@ export const StreamManager: React.FC = () => {
                   </Select>
                 </div>
 
-                <Button variant="outline" size="icon" onClick={() => setManagementOpen(true)} title="Management">
+                <Button variant="outline" size="icon" onClick={() => setManagementOpen(true)} title="User Management">
                   <Settings className="h-4 w-4" />
                 </Button>
 
@@ -759,13 +776,8 @@ export const StreamManager: React.FC = () => {
                   size="icon"
                   title="Logout"
                   onClick={async () => {
-                    // ✅ LOG logout attempt
-                    void logActivity({
-                      action: "logout",
-                      target_type: "auth",
-                      description: "User logged out",
-                    });
-
+                    // log before leaving
+                    void logActivity({ action: "logout", description: "User logged out" });
                     await logout();
                     window.location.href = "/login";
                   }}
@@ -778,7 +790,12 @@ export const StreamManager: React.FC = () => {
         </div>
       </div>
 
-      <ManagementDialog isOpen={isManagementOpen} onClose={() => setManagementOpen(false)} />
+      <ManagementDialog
+        isOpen={isManagementOpen}
+        onClose={() => setManagementOpen(false)}
+        // Optional: allow dialog to refresh streams after edit
+        onStreamsChanged={() => void loadStreamsFromDb()}
+      />
 
       {/* Stream Grid */}
       <div className="lg:col-span-3">
@@ -800,22 +817,7 @@ export const StreamManager: React.FC = () => {
                   <Button
                     variant="destructive"
                     size="sm"
-                    onClick={() => {
-                      setReloadSignals((rs) => ({
-                        ...rs,
-                        [stream.id]: (rs[stream.id] || 0) + 1,
-                      }));
-
-                      // ✅ LOG reload
-                      void logActivity({
-                        action: "reload_stream",
-                        target_type: "stream",
-                        target_id: stream.id,
-                        target_name: stream.name,
-                        description: `Reloaded stream: ${stream.name}`,
-                        details: { url: stream.url },
-                      });
-                    }}
+                    onClick={() => setReloadSignals((rs) => ({ ...rs, [stream.id]: (rs[stream.id] || 0) + 1 }))}
                     title="Reload this stream"
                   >
                     <RotateCcw className="h-4 w-4" />
