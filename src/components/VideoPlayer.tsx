@@ -22,19 +22,21 @@ interface VideoPlayerProps {
   canRemove?: boolean;
 }
 
-// ---------- Base URLs ----------
-const API_BASE =
-  (import.meta.env.VITE_API_BASE?.replace(/\/+$/, "")) ||
-  `${window.location.protocol}//${window.location.hostname}:3001`;
+// ---------- ENV / BASE URLs (Lovable-safe) ----------
+const normalizeBase = (v?: string) => (v ? v.replace(/\/+$/, "") : "");
 
-const HLS_BASE =
-  (import.meta.env.VITE_HLS_BASE?.replace(/\/+$/, "")) ||
-  `${window.location.protocol}//${window.location.hostname}:8000`;
+const API_BASE = normalizeBase(import.meta.env.VITE_API_BASE);
+const HLS_BASE = normalizeBase(import.meta.env.VITE_HLS_BASE);
+
+// If no env provided, fallback to origin only (NO port guessing!)
+const FALLBACK_ORIGIN = `${window.location.protocol}//${window.location.host}`;
+const EFFECTIVE_API_BASE = API_BASE || ""; // if empty => no proxy calls
+const EFFECTIVE_HLS_BASE = HLS_BASE || FALLBACK_ORIGIN;
 
 // Is this URL already our own /live/... endpoint?
 const isOurHlsUrl = (url: string): boolean => {
   try {
-    const base = HLS_BASE || `${window.location.protocol}//${window.location.host}`;
+    const base = EFFECTIVE_HLS_BASE || FALLBACK_ORIGIN;
     const u = new URL(url, base);
     const ourHost = new URL(base).host;
     return u.pathname.startsWith("/live/") && u.host === ourHost;
@@ -78,7 +80,6 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
   const [errorText, setErrorText] = useState<string>("");
   const [isLoading, setIsLoading] = useState(true);
 
-  // Start immediately; visibility only used for optional skip.
   const [isVisible, setIsVisible] = useState(true);
 
   const [computedStatus, setComputedStatus] = useState<"online" | "offline">("online");
@@ -91,12 +92,11 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
 
   const fragLoadedRef = useRef(false);
   const manifestWatchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const teardownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const retryCountRef = useRef(0);
   const MAX_RETRIES = 10;
 
-  // ---- NEW: guard against play() races / overlapping loads ----
+  // ✅ prevents AbortError spam (overlapping loads)
   const loadSeqRef = useRef(0);
   const abortInitRef = useRef<(() => void) | null>(null);
 
@@ -135,8 +135,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     try {
       v.pause();
       v.removeAttribute("src");
-      // NOTE: removing v.load() helps reduce AbortError races
-      // v.load();
+      // NOTE: avoid v.load(); it can amplify AbortError races
     } catch (e) {
       console.warn("teardownPlayer: failed to reset video element", e);
     }
@@ -150,11 +149,17 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     setIsPlaying(false);
   }, []);
 
+  const safeJoinHlsBase = (maybePath: string) => {
+    // if server returns "/live/xxx.m3u8" convert -> HLS_BASE + path
+    if (maybePath.startsWith("/")) return `${EFFECTIVE_HLS_BASE}${maybePath}`;
+    return maybePath;
+  };
+
   const initializeStream = useCallback(async () => {
     const video = videoRef.current;
     if (!video) return;
 
-    // ---- NEW: sequence + cancellation (prevents AbortError spam) ----
+    // ---- sequence + cancellation guard ----
     const mySeq = ++loadSeqRef.current;
     let cancelled = false;
 
@@ -165,7 +170,6 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
 
     const isStale = () => cancelled || mySeq !== loadSeqRef.current;
 
-    // Autoplay policies
     video.muted = true;
     video.playsInline = true;
 
@@ -178,18 +182,21 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
 
     if (manifestWatchRef.current) clearTimeout(manifestWatchRef.current);
 
-    // teardown previous player before new load
     teardownPlayer();
 
     let finalStreamUrl: string = proxiedHlsUrl || streamUrl;
-    const mustProxy = !finalStreamUrl.includes(".m3u8");
     const streamType = getStreamType(streamUrl);
 
-    // If not .m3u8 or not our HLS endpoint -> request server proxy/start
-    if (mustProxy || !isOurHlsUrl(finalStreamUrl)) {
+    const isM3u8 = finalStreamUrl.toLowerCase().includes(".m3u8");
+
+    // ✅ Proxy only if we have an API base configured
+    const canCallApi = Boolean(EFFECTIVE_API_BASE);
+
+    // If stream isn't a .m3u8 or isn't our endpoint, and we have API, ask server to start/proxy
+    if (canCallApi && (!isM3u8 || !isOurHlsUrl(finalStreamUrl))) {
       try {
         const token = getToken();
-        const res = await fetch(`${API_BASE}/start-stream`, {
+        const res = await fetch(`${EFFECTIVE_API_BASE}/start-stream`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -214,16 +221,22 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
           (typeof dataRaw === "string" && dataRaw.trim());
 
         if (hlsAbs) {
-          finalStreamUrl = hlsAbs.startsWith("/") ? `${HLS_BASE}${hlsAbs}` : hlsAbs;
+          finalStreamUrl = safeJoinHlsBase(hlsAbs);
           setProxiedHlsUrl(finalStreamUrl);
         } else {
           throw new Error("Server did not return HLS URL");
         }
       } catch (e) {
-        if (mustProxy) {
-          return handleError(`Failed to prepare server HLS proxy (${streamType}): ${String(e)}`);
+        // If url isn't m3u8 and we can't proxy -> fail
+        if (!isM3u8) {
+          return handleError(`No API proxy available for ${streamType}. Set VITE_API_BASE. (${String(e)})`);
         }
-        // if it was already m3u8 but not ours, we can still attempt direct play
+        // if it IS m3u8, still attempt direct playback
+      }
+    } else {
+      // No API configured
+      if (!isM3u8) {
+        return handleError(`This stream needs proxy (${streamType}) but VITE_API_BASE is not set in Lovable env.`);
       }
     }
 
@@ -231,7 +244,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
 
     finalStreamUrl = withCacheBuster(finalStreamUrl);
 
-    // Watchdog: if manifest loads but no fragments, retry/error
+    // watchdog
     if (manifestWatchRef.current) clearTimeout(manifestWatchRef.current);
     manifestWatchRef.current = setTimeout(() => {
       if (!fragLoadedRef.current && !isStale()) {
@@ -239,7 +252,6 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
       }
     }, 12_000);
 
-    // Capture HTML video errors too
     const onVideoError = () => {
       if (isStale()) return;
       const code = video.error?.code;
@@ -265,7 +277,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
         setIsPlaying(true);
         retryCountRef.current = 0;
       } catch (err: any) {
-        // AbortError is expected when reload/teardown happens quickly.
+        // ✅ Ignore AbortError (new load happened)
         if (err?.name === "AbortError") return;
         handleError(`Playback failed: ${String(err)}`);
       }
@@ -298,7 +310,6 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
 
         const details = data?.details || "unknown";
         const type = data?.type || "unknown";
-        const fatal = data?.fatal ? "fatal" : "non-fatal";
         const resp: any = (data as any)?.response;
         const statusCode = resp?.code ? `HTTP ${resp.code}` : "";
         const url = resp?.url ? `URL: ${resp.url}` : "";
@@ -307,7 +318,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
         console.error("HLS ERROR", data);
 
         if (data.fatal) {
-          handleError(`HLS ${fatal}: ${type} / ${details} ${statusCode} ${url} ${reason}`.trim());
+          handleError(`HLS fatal: ${type} / ${details} ${statusCode} ${url} ${reason}`.trim());
         }
       });
 
@@ -383,7 +394,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     else setComputedStatus("offline");
   }, [status, measuredBitrate]);
 
-  // Visibility observer (optional)
+  // Visibility observer
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -402,11 +413,9 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     void initializeStream();
 
     return () => {
-      // cancel any in-flight init
       abortInitRef.current?.();
       teardownPlayer();
       if (manifestWatchRef.current) clearTimeout(manifestWatchRef.current);
-      if (teardownTimerRef.current) clearTimeout(teardownTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadKey, streamUrl]);
