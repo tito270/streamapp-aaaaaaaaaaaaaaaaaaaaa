@@ -510,16 +510,11 @@ export const StreamManager: React.FC = () => {
               {currentTime.toISOString().slice(0, 10)}
             </div>
 
-            {user && (
+            {userEmail && (
               <div className="mt-1">
                 <div className="text-sm text-muted-foreground">
-                  Welcome, <span className="text-foreground font-semibold">{user.username}</span>
+                  Welcome, <span className="text-foreground font-semibold">{user.username}{userEmail}</span>
                 </div>
-                {userEmail && (
-                  <div className="text-xs text-muted-foreground">
-                    Email: <span className="font-mono">{userEmail}</span>
-                  </div>
-                )}
               </div>
             )}
           </div>
