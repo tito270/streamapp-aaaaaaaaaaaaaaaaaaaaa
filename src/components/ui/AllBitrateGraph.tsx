@@ -38,6 +38,31 @@ interface TickProps {
   payload?: { value: number };
 }
 
+// ✅ NEW: localStorage helpers for xDomain persistence
+const LS_DOMAIN_PREFIX = "streamwall_bitrate_xDomain_v1";
+
+function makeDomainKey(streams: StreamDef[]) {
+  const ids = streams.map((s) => s.id).sort().join(",");
+  return `${LS_DOMAIN_PREFIX}:${ids || "none"}`;
+}
+
+function safeParseDomain(raw: string | null): [number, number] | null {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw);
+    if (!Array.isArray(v) || v.length !== 2) return null;
+    const a = Number(v[0]);
+    const b = Number(v[1]);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+    const min = Math.min(a, b);
+    const max = Math.max(a, b);
+    if (max - min < 5_000) return null;
+    return [min, max];
+  } catch {
+    return null;
+  }
+}
+
 const CustomYAxisTick: React.FC<TickProps> = ({ x, y, payload }) => {
   if (x == null || y == null || !payload) return null;
   const v = Number(payload.value);
@@ -129,20 +154,49 @@ const AllBitrateGraph: React.FC<AllBitrateGraphProps> = ({
     return [t0, t1];
   }, [processedData]);
 
-  // Initial X domain: respect prop if valid, else last hour
+  // ✅ NEW: stable key per selected stream set (so each selection remembers zoom)
+  const domainKey = React.useMemo(() => makeDomainKey(streams), [streams]);
+
+  // Initial X domain: restore saved if exists, else respect prop if valid, else last hour
   const [xDomain, setXDomain] = React.useState<[number, number]>(() => {
-    const [minI, maxI] =
+    const saved = safeParseDomain(typeof window !== "undefined" ? localStorage.getItem(domainKey) : null);
+
+    const fallback: [number, number] =
       initialTimeDomain && Number.isFinite(initialTimeDomain[0]) && Number.isFinite(initialTimeDomain[1])
-        ? initialTimeDomain
-        : ((): [number, number] => {
+        ? [Math.min(initialTimeDomain[0], initialTimeDomain[1]), Math.max(initialTimeDomain[0], initialTimeDomain[1])]
+        : (() => {
             const now = Date.now();
             return [now - 60 * 60 * 1000, now];
           })();
-    // Clamp to data initially
-    const min = Math.min(minI, maxI);
-    const max = Math.max(minI, maxI);
-    return [Math.max(min, dataMin), Math.min(max, dataMax)];
+
+    return saved ?? fallback;
   });
+
+  // ✅ NEW: clamp restored domain to available data extent
+  React.useEffect(() => {
+    setXDomain(([min, max]) => {
+      const a = Math.max(Math.min(min, max), dataMin);
+      const b = Math.min(Math.max(min, max), dataMax);
+      if (b - a < 5_000) {
+        const oneHour = 60 * 60 * 1000;
+        return [Math.max(dataMin, dataMax - oneHour), dataMax];
+      }
+      return [a, b];
+    });
+  }, [dataMin, dataMax]);
+
+  // ✅ NEW: persist xDomain (throttled)
+  React.useEffect(() => {
+    const id = window.setTimeout(() => {
+      try {
+        localStorage.setItem(domainKey, JSON.stringify(xDomain));
+      } catch {
+        // ignore
+      }
+    }, 250);
+
+    return () => window.clearTimeout(id);
+  }, [xDomain, domainKey]);
 
   // Auto Y domain
   const [yDomain, setYDomain] = React.useState<[number, number]>([0, Math.max(8, maxBitrate)]);
@@ -215,7 +269,7 @@ const AllBitrateGraph: React.FC<AllBitrateGraphProps> = ({
   }
 
   const zoomIn = () => zoom(0.5, "right"); // halve width, keep right edge fixed
-  const zoomOut = () => zoom(2, "right");  // double width, keep right edge fixed
+  const zoomOut = () => zoom(2, "right"); // double width, keep right edge fixed
 
   // Optional: Reset to "last hour ending at latest data"
   const reset = () => {
@@ -325,9 +379,7 @@ const AllBitrateGraph: React.FC<AllBitrateGraphProps> = ({
             type="number"
             domain={xDomain}
             ticks={minuteTicks}
-            tickFormatter={(v) =>
-              new Date(v).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false })
-            }
+            tickFormatter={(v) => new Date(v).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false })}
             stroke="#888"
             interval={0}
             tick={<CustomXAxisTick />}
