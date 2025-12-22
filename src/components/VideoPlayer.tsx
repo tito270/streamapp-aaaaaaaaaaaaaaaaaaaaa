@@ -28,6 +28,23 @@ interface VideoPlayerProps {
   onBitrateUpdate?: (streamId: string, bitrate: number | null) => void;
   className?: string;
   canRemove?: boolean;
+
+  // ✅ Traffic events (real-time diagnostics)
+  onTrafficEvent?: (evt: {
+    ts?: number;
+    streamId: string;
+    streamName: string;
+    type:
+      | "NO_SIGNAL"
+      | "FROZEN"
+      | "BLACK"
+      | "SILENT"
+      | "BUFFERING"
+      | "RECOVERED"
+      | "ERROR";
+    message: string;
+    severity?: "info" | "warn" | "critical";
+  }) => void;
 }
 
 // Cache busting
@@ -54,6 +71,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
   reloadSignal,
   status,
   onBitrateUpdate,
+  onTrafficEvent,
   className,
   canRemove = true,
 }) => {
@@ -68,7 +86,9 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
   const [isLoading, setIsLoading] = useState(true);
 
   const [isVisible, setIsVisible] = useState(true);
-  const [computedStatus, setComputedStatus] = useState<"online" | "offline">("online");
+  const [computedStatus, setComputedStatus] = useState<"online" | "offline">(
+    "online"
+  );
 
   const [measuredBitrate, setMeasuredBitrate] = useState<number | null>(null);
   const [showControls, setShowControls] = useState(false);
@@ -81,6 +101,43 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
 
   const retryCountRef = useRef(0);
   const MAX_RETRIES = 8;
+
+  // ✅ traffic dedupe (avoid spamming same message)
+  const lastEvtRef = useRef<{ key: string; at: number } | null>(null);
+
+  const emitTraffic = useCallback(
+    (
+      type:
+        | "NO_SIGNAL"
+        | "FROZEN"
+        | "BLACK"
+        | "SILENT"
+        | "BUFFERING"
+        | "RECOVERED"
+        | "ERROR",
+      message: string,
+      severity: "info" | "warn" | "critical" = "info"
+    ) => {
+      const key = `${type}:${message}`;
+      const now = Date.now();
+      const last = lastEvtRef.current;
+
+      // dedupe same event within 10 seconds
+      if (last && last.key === key && now - last.at < 10_000) return;
+
+      lastEvtRef.current = { key, at: now };
+
+      onTrafficEvent?.({
+        ts: now,
+        streamId,
+        streamName,
+        type,
+        message,
+        severity,
+      });
+    },
+    [onTrafficEvent, streamId, streamName]
+  );
 
   const handleError = useCallback(
     (msg?: string) => {
@@ -142,7 +199,14 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     // ✅ Frontend-only mode: we only support HLS .m3u8
     if (!isHlsUrl(streamUrl)) {
       setIsLoading(false);
-      return handleError("This stream type needs a backend (RTMP/RTSP/UDP). Please use an HLS .m3u8 URL.");
+      emitTraffic(
+        "ERROR",
+        "This stream type needs a backend (RTMP/RTSP/UDP). Use an HLS .m3u8 URL.",
+        "warn"
+      );
+      return handleError(
+        "This stream type needs a backend (RTMP/RTSP/UDP). Please use an HLS .m3u8 URL."
+      );
     }
 
     const finalStreamUrl = withCacheBuster(streamUrl);
@@ -150,7 +214,14 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     // Watchdog: if manifest loads but no fragments, likely blocked segments/CORS/403
     manifestWatchRef.current = setTimeout(() => {
       if (!fragLoadedRef.current) {
-        handleError("No HLS fragments received (timeout). Check CORS/403/blocked .ts/.m4s segments.");
+        emitTraffic(
+          "NO_SIGNAL",
+          "No HLS fragments received (timeout). Check CORS/403/blocked segments.",
+          "critical"
+        );
+        handleError(
+          "No HLS fragments received (timeout). Check CORS/403/blocked .ts/.m4s segments."
+        );
       }
     }, 12_000);
 
@@ -166,6 +237,8 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
           : code === 4
           ? "MEDIA_ERR_SRC_NOT_SUPPORTED"
           : "Unknown video error";
+
+      emitTraffic("ERROR", `Video element error: ${msg}`, "critical");
       handleError(`Video element error: ${msg}`);
     };
     video.addEventListener("error", onVideoError, { once: true });
@@ -197,12 +270,35 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
         const resp: any = (data as any)?.response;
         const statusCode = resp?.code ? `HTTP ${resp.code}` : "";
         const url = resp?.url ? `URL: ${resp.url}` : "";
-        const reason = (data as any)?.error?.message ? `Reason: ${(data as any).error.message}` : "";
+        const reason = (data as any)?.error?.message
+          ? `Reason: ${(data as any).error.message}`
+          : "";
 
         console.error("HLS ERROR", data);
 
         if (data.fatal) {
-          handleError(`HLS ${fatal}: ${type} / ${details} ${statusCode} ${url} ${reason}`.trim());
+          emitTraffic(
+            "ERROR",
+            `HLS fatal: ${type}/${details} ${statusCode}`.trim(),
+            "critical"
+          );
+
+          // Many fatal network errors = effectively no signal
+          if (
+            String(type).toLowerCase().includes("network") ||
+            String(details).toLowerCase().includes("frag") ||
+            String(details).toLowerCase().includes("manifest")
+          ) {
+            emitTraffic(
+              "NO_SIGNAL",
+              `HLS fatal network issue: ${details} ${statusCode}`.trim(),
+              "critical"
+            );
+          }
+
+          handleError(
+            `HLS ${fatal}: ${type} / ${details} ${statusCode} ${url} ${reason}`.trim()
+          );
         }
       });
 
@@ -216,7 +312,10 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
             setIsPlaying(true);
             retryCountRef.current = 0;
           })
-          .catch((err) => handleError(`Playback failed: ${String(err)}`));
+          .catch((err) => {
+            emitTraffic("ERROR", `Playback failed: ${String(err)}`, "critical");
+            handleError(`Playback failed: ${String(err)}`);
+          });
       });
 
       hls.attachMedia(video);
@@ -239,15 +338,29 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
               setIsPlaying(true);
               retryCountRef.current = 0;
             })
-            .catch((err) => handleError(`Playback failed: ${String(err)}`));
+            .catch((err) => {
+              emitTraffic("ERROR", `Playback failed: ${String(err)}`, "critical");
+              handleError(`Playback failed: ${String(err)}`);
+            });
         },
         { once: true }
       );
       return;
     }
 
+    emitTraffic("ERROR", "HLS is not supported in this browser.", "critical");
     handleError("HLS is not supported in this browser.");
-  }, [isVisible, streamUrl, teardownPlayer, isMuted, onBitrateUpdate, streamId, status, handleError]);
+  }, [
+    isVisible,
+    streamUrl,
+    teardownPlayer,
+    isMuted,
+    onBitrateUpdate,
+    streamId,
+    status,
+    handleError,
+    emitTraffic,
+  ]);
 
   // Retry logic
   useEffect(() => {
@@ -281,7 +394,10 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     const el = containerRef.current;
     if (!el) return;
 
-    const observer = new IntersectionObserver(([entry]) => setIsVisible(entry.isIntersecting), { threshold: 0.1 });
+    const observer = new IntersectionObserver(
+      ([entry]) => setIsVisible(entry.isIntersecting),
+      { threshold: 0.1 }
+    );
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
@@ -316,7 +432,10 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     video
       .play()
       .then(() => setIsPlaying(true))
-      .catch((e) => handleError(`Playback failed: ${String(e)}`));
+      .catch((e) => {
+        emitTraffic("ERROR", `Playback failed: ${String(e)}`, "critical");
+        handleError(`Playback failed: ${String(e)}`);
+      });
   };
 
   const toggleMute = () => {
@@ -336,6 +455,164 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     if (document.fullscreenElement) document.exitFullscreen();
     else video.requestFullscreen();
   };
+
+  // ✅ Buffering / recovered events
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+
+    const onWaiting = () =>
+      emitTraffic("BUFFERING", "Video waiting (buffering)", "info");
+    const onStalled = () =>
+      emitTraffic("BUFFERING", "Video stalled", "warn");
+    const onPlaying = () =>
+      emitTraffic("RECOVERED", "Playback resumed", "info");
+
+    v.addEventListener("waiting", onWaiting);
+    v.addEventListener("stalled", onStalled);
+    v.addEventListener("playing", onPlaying);
+
+    return () => {
+      v.removeEventListener("waiting", onWaiting);
+      v.removeEventListener("stalled", onStalled);
+      v.removeEventListener("playing", onPlaying);
+    };
+  }, [emitTraffic]);
+
+  // ✅ Frozen detector (currentTime not advancing)
+  const freezeRef = useRef({ lastT: 0, stuck: 0 });
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+
+    const id = setInterval(() => {
+      if (hasError || isLoading) return;
+      if (v.paused) return;
+      if (v.readyState < 2) return;
+
+      const t = v.currentTime;
+      const diff = Math.abs(t - freezeRef.current.lastT);
+
+      if (diff < 0.01) freezeRef.current.stuck += 1;
+      else freezeRef.current.stuck = 0;
+
+      freezeRef.current.lastT = t;
+
+      if (freezeRef.current.stuck === 8) {
+        emitTraffic("FROZEN", "Video currentTime not advancing for ~8s", "warn");
+      }
+    }, 1000);
+
+    return () => clearInterval(id);
+  }, [hasError, isLoading, emitTraffic]);
+
+  // ✅ Silent audio detector (audio level stays low while playback active)
+  const silenceRef = useRef({ hits: 0 });
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+
+    const id = setInterval(() => {
+      if (hasError || isLoading) return;
+      if (v.paused) return;
+      if (v.readyState < 2) return;
+
+      // If stream is muted intentionally, you may want to skip silence alerts.
+      // If you still want to detect silence even when muted, comment next line.
+      if (v.muted) return;
+
+      const avg = (audioLevels.left + audioLevels.right) / 2;
+
+      // Tune threshold based on your meter scale (0..1 typical)
+      const SILENCE_THRESHOLD = 0.01;
+
+      if (avg < SILENCE_THRESHOLD) silenceRef.current.hits += 1;
+      else silenceRef.current.hits = 0;
+
+      // ~10 seconds continuous silence (1s interval)
+      if (silenceRef.current.hits === 10) {
+        emitTraffic(
+          "SILENT",
+          "Audio appears silent for ~10s while playback is active",
+          "warn"
+        );
+      }
+    }, 1000);
+
+    return () => clearInterval(id);
+  }, [
+    hasError,
+    isLoading,
+    emitTraffic,
+    audioLevels.left,
+    audioLevels.right,
+  ]);
+
+  // ✅ Black frame detector (best-effort; may fail if canvas is tainted by CORS)
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const blackRef = useRef({ hits: 0 });
+
+  useEffect(() => {
+    const c = document.createElement("canvas");
+    c.width = 64;
+    c.height = 36;
+    canvasRef.current = c;
+  }, []);
+
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+
+    const id = setInterval(() => {
+      if (hasError || isLoading) return;
+      if (v.readyState < 2) return;
+      if (!v.videoWidth || !v.videoHeight) return;
+
+      const c = canvasRef.current;
+      if (!c) return;
+      const ctx = c.getContext("2d", { willReadFrequently: true });
+      if (!ctx) return;
+
+      try {
+        ctx.drawImage(v, 0, 0, c.width, c.height);
+        const img = ctx.getImageData(0, 0, c.width, c.height).data;
+
+        let sum = 0;
+        for (let i = 0; i < img.length; i += 4) {
+          sum += (img[i] + img[i + 1] + img[i + 2]) / 3;
+        }
+        const avgBrightness = sum / (img.length / 4); // 0..255
+
+        // Tune threshold
+        if (avgBrightness < 12) blackRef.current.hits += 1;
+        else blackRef.current.hits = 0;
+
+        if (blackRef.current.hits === 5) {
+          // stronger if audio present (even if muted detection is off, levels still indicate signal)
+          const audioAvg = (audioLevels.left + audioLevels.right) / 2;
+          const audioPresent = audioAvg > 0.03;
+
+          emitTraffic(
+            "BLACK",
+            audioPresent
+              ? "Frame is black while audio is present"
+              : "Frame is black (low brightness for ~10s)",
+            audioPresent ? "critical" : "warn"
+          );
+        }
+      } catch {
+        // canvas read blocked by CORS → ignore
+      }
+    }, 2000);
+
+    return () => clearInterval(id);
+  }, [
+    hasError,
+    isLoading,
+    emitTraffic,
+    audioLevels.left,
+    audioLevels.right,
+  ]);
 
   return (
     <Card
@@ -362,16 +639,31 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
       <div
         className={cn(
           "absolute top-1 left-2 z-10 px-2 py-0.2 rounded text-xs font-semibold flex items-center gap-2",
-          status === "online" ? "bg-green-700" : status === "offline" ? "bg-red-700" : "bg-primary/90"
+          status === "online"
+            ? "bg-green-700"
+            : status === "offline"
+            ? "bg-red-700"
+            : "bg-primary/90"
         )}
       >
-        <span className="text-[10px] text-white">{status ?? computedStatus}</span>
+        <span className="text-[10px] text-white">
+          {status ?? computedStatus}
+        </span>
       </div>
 
-      <AudioMeter leftLevel={audioLevels.left} rightLevel={audioLevels.right} className="absolute bottom-14 right-2 z-10" />
+      <AudioMeter
+        leftLevel={audioLevels.left}
+        rightLevel={audioLevels.right}
+        className="absolute bottom-14 right-2 z-10"
+      />
 
       <div className="relative h-57 w-25">
-        <video ref={videoRef} className="w-full h-full object-cover bg-black" playsInline controls={false} />
+        <video
+          ref={videoRef}
+          className="w-full h-full object-cover bg-black"
+          playsInline
+          controls={false}
+        />
 
         {isLoading && (
           <div className="absolute inset-0 flex items-center justify-center bg-stream-bg">
@@ -388,7 +680,12 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
                 {errorText}
               </p>
             )}
-            <Button onClick={initializeStream} variant="outline" size="sm" className="mt-3">
+            <Button
+              onClick={initializeStream}
+              variant="outline"
+              size="sm"
+              className="mt-3"
+            >
               <RefreshCcw className="h-4 w-4 mr-2" />
               Retry
             </Button>
@@ -398,19 +695,47 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
         {showControls && !hasError && !isLoading && (
           <div className="absolute inset-0 bg-black/20 flex items-center justify-center">
             <div className="flex items-center gap-4 bg-black/60 rounded-lg px-4 py-2">
-              <Button onClick={togglePlay} variant="ghost" size="sm" className="text-white hover:bg-white/20">
-                {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+              <Button
+                onClick={togglePlay}
+                variant="ghost"
+                size="sm"
+                className="text-white hover:bg-white/20"
+              >
+                {isPlaying ? (
+                  <Pause className="h-4 w-4" />
+                ) : (
+                  <Play className="h-4 w-4" />
+                )}
               </Button>
 
-              <Button onClick={toggleMute} variant="ghost" size="sm" className="text-white hover:bg-white/20">
-                {isMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+              <Button
+                onClick={toggleMute}
+                variant="ghost"
+                size="sm"
+                className="text-white hover:bg-white/20"
+              >
+                {isMuted ? (
+                  <VolumeX className="h-4 w-4" />
+                ) : (
+                  <Volume2 className="h-4 w-4" />
+                )}
               </Button>
 
-              <Button onClick={toggleFullscreen} variant="ghost" size="sm" className="text-white hover:bg-white/20">
+              <Button
+                onClick={toggleFullscreen}
+                variant="ghost"
+                size="sm"
+                className="text-white hover:bg-white/20"
+              >
                 <Maximize className="h-4 w-4" />
               </Button>
 
-              <Button onClick={forceReload} variant="ghost" size="sm" className="text-white hover:bg-white/20">
+              <Button
+                onClick={forceReload}
+                variant="ghost"
+                size="sm"
+                className="text-white hover:bg-white/20"
+              >
                 <RefreshCcw className="h-4 w-4" />
               </Button>
             </div>
@@ -420,7 +745,9 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
         <div className="p-3 bg-stream-bg border-t border-stream-border">
           <div className="min-w-0">
             <p className="text-sm font-semibold truncate">{streamName}</p>
-            <p className="text-xs text-muted-foreground font-mono truncate">{streamUrl}</p>
+            <p className="text-xs text-muted-foreground font-mono truncate">
+              {streamUrl}
+            </p>
           </div>
         </div>
       </div>
