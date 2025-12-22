@@ -73,7 +73,7 @@ type ActivityAction =
   | "logout"
   | "add_stream"
   | "edit_stream"
-  | "delete_stream"
+  | "delete_stream" // keep (ManagementDialog may still log this)
   | "save_list"
   | "load_list"
   | "download_bitrate_csv"
@@ -289,7 +289,6 @@ export const StreamManager: React.FC = () => {
     }
   }, [logsLimit, toast]);
 
-  // When switching to logs tab, auto-load
   useEffect(() => {
     if (activeTab !== "logs") return;
     void fetchLogs();
@@ -341,7 +340,6 @@ export const StreamManager: React.FC = () => {
 
     const { error } = await supabase.from("traffic_logs").insert(batch);
     if (error) {
-      // put it back; but don't grow infinite
       trafficBufferRef.current.unshift(...batch.slice(0, 500));
       console.warn("traffic_logs insert blocked/failed:", error.message);
     }
@@ -602,46 +600,6 @@ export const StreamManager: React.FC = () => {
       description: "Stream added",
     });
   }, [streamUrl, streams, streamName, resolution, toast, logActivity]);
-
-  // --------- Remove stream ----------
-  const removeStream = useCallback(
-    async (streamId: string) => {
-      const stream = streams.find((s) => s.id === streamId);
-
-      const { error } = await supabase.from("streams").delete().eq("id", streamId);
-      if (error) {
-        toast({ title: "Failed to delete stream", description: error.message, variant: "destructive" });
-        return;
-      }
-
-      setStreams((prev) => prev.filter((s) => s.id !== streamId));
-      setAllBitrateHistory((prev) => {
-        const cleaned = prev.map((p) => {
-          const np = { ...p };
-          delete np[streamId];
-          return np;
-        });
-        return cleaned.filter((p) => Object.keys(p).length > 1);
-      });
-
-      setReloadSignals((prev) => {
-        const next = { ...prev };
-        delete next[streamId];
-        return next;
-      });
-
-      toast({ title: "Stream Removed" });
-
-      void logActivity({
-        action: "delete_stream",
-        target_type: "stream",
-        target_id: streamId,
-        target_name: stream?.name ?? null,
-        description: "Stream deleted",
-      });
-    },
-    [toast, streams, logActivity]
-  );
 
   // --------- Save list to file ----------
   const saveListToFile = useCallback(() => {
@@ -998,7 +956,11 @@ export const StreamManager: React.FC = () => {
         </div>
       </div>
 
-      <ManagementDialog isOpen={isManagementOpen} onClose={() => setManagementOpen(false)} onStreamsChanged={() => void loadStreamsFromDb()} />
+      <ManagementDialog
+        isOpen={isManagementOpen}
+        onClose={() => setManagementOpen(false)}
+        onStreamsChanged={() => void loadStreamsFromDb()}
+      />
 
       {/* Stream Grid */}
       <div className="lg:col-span-3">
@@ -1007,7 +969,9 @@ export const StreamManager: React.FC = () => {
             <CardContent className="flex flex-col items-center justify-center py-16 text-center">
               <Monitor className="h-12 w-12 text-muted-foreground mb-4" />
               <h3 className="text-xl font-semibold mb-2">No streams active</h3>
-              <p className="text-muted-foreground max-w-md">Add your first HLS (.m3u8) URL above to start monitoring. Supports up to 12 concurrent streams.</p>
+              <p className="text-muted-foreground max-w-md">
+                Add your first HLS (.m3u8) URL above to start monitoring. Supports up to 12 concurrent streams.
+              </p>
             </CardContent>
           </Card>
         ) : (
@@ -1031,15 +995,9 @@ export const StreamManager: React.FC = () => {
                   streamUrl={stream.url}
                   resolution={stream.resolution}
                   onResolutionChange={() => {}}
-                  onRemove={async () => {
-                    const confirmed = window.confirm(`Remove "${stream.name}"?`);
-                    if (!confirmed) return;
-                    await removeStream(stream.id);
-                  }}
                   reloadSignal={reloadSignals[stream.id] || 0}
                   onBitrateUpdate={(id, br) => void handleBitrateUpdate(id, br)}
                   onTrafficEvent={(evt) => void handleTrafficEvent(evt)}
-                  canRemove={true}
                   status={(failureCounts[stream.id] || 0) === 0 ? "online" : "offline"}
                 />
               </div>
@@ -1150,9 +1108,7 @@ export const StreamManager: React.FC = () => {
               <div className="flex items-center justify-between">
                 <div>
                   <h3 className="text-lg font-semibold">Traffic Logs (Real-time)</h3>
-                  <p className="text-xs text-muted-foreground">
-                    Issues: No Signal / Frozen / Black / Silent / Buffering / Error — newest first
-                  </p>
+                  <p className="text-xs text-muted-foreground">Issues: No Signal / Frozen / Black / Silent / Buffering / Error — newest first</p>
                 </div>
                 <div className="text-xs text-muted-foreground">
                   Showing <span className="font-semibold">{filteredTraffic.length}</span> / {traffic.length}
@@ -1162,11 +1118,7 @@ export const StreamManager: React.FC = () => {
               {/* Filters */}
               <div className="flex flex-wrap gap-2 items-center">
                 <Label className="text-xs text-muted-foreground">Type:</Label>
-                <select
-                  className="h-9 rounded-md border bg-background px-3 text-sm"
-                  value={trafficTypeFilter}
-                  onChange={(e) => setTrafficTypeFilter(e.target.value as any)}
-                >
+                <select className="h-9 rounded-md border bg-background px-3 text-sm" value={trafficTypeFilter} onChange={(e) => setTrafficTypeFilter(e.target.value as any)}>
                   <option value="ALL">All</option>
                   <option value="NO_SIGNAL">No Signal</option>
                   <option value="FROZEN">Frozen</option>
@@ -1178,11 +1130,7 @@ export const StreamManager: React.FC = () => {
                 </select>
 
                 <Label className="text-xs text-muted-foreground">Severity:</Label>
-                <select
-                  className="h-9 rounded-md border bg-background px-3 text-sm"
-                  value={trafficSeverityFilter}
-                  onChange={(e) => setTrafficSeverityFilter(e.target.value as any)}
-                >
+                <select className="h-9 rounded-md border bg-background px-3 text-sm" value={trafficSeverityFilter} onChange={(e) => setTrafficSeverityFilter(e.target.value as any)}>
                   <option value="ALL">All</option>
                   <option value="info">Info</option>
                   <option value="warn">Warn</option>
@@ -1190,11 +1138,7 @@ export const StreamManager: React.FC = () => {
                 </select>
 
                 <Label className="text-xs text-muted-foreground">Stream:</Label>
-                <select
-                  className="h-9 rounded-md border bg-background px-3 text-sm"
-                  value={trafficStreamFilter}
-                  onChange={(e) => setTrafficStreamFilter(e.target.value)}
-                >
+                <select className="h-9 rounded-md border bg-background px-3 text-sm" value={trafficStreamFilter} onChange={(e) => setTrafficStreamFilter(e.target.value)}>
                   <option value="ALL">All</option>
                   {streams.map((s) => (
                     <option key={s.id} value={s.id}>
@@ -1204,11 +1148,7 @@ export const StreamManager: React.FC = () => {
                 </select>
 
                 <Label className="text-xs text-muted-foreground">Keep:</Label>
-                <select
-                  className="h-9 rounded-md border bg-background px-3 text-sm"
-                  value={String(trafficLimit)}
-                  onChange={(e) => setTrafficLimit(Number(e.target.value))}
-                >
+                <select className="h-9 rounded-md border bg-background px-3 text-sm" value={String(trafficLimit)} onChange={(e) => setTrafficLimit(Number(e.target.value))}>
                   <option value="200">200</option>
                   <option value="500">500</option>
                   <option value="1000">1000</option>
@@ -1248,15 +1188,11 @@ export const StreamManager: React.FC = () => {
                     filteredTraffic.map((t, idx) => (
                       <TableRow key={`${t.ts}-${t.streamId}-${idx}`}>
                         <TableCell className="text-xs font-mono">{formatDateTime(t.ts)}</TableCell>
-                        <TableCell className="text-sm font-semibold">
-                          {t.severity}
-                        </TableCell>
+                        <TableCell className="text-sm font-semibold">{t.severity}</TableCell>
                         <TableCell className="text-sm font-semibold">{trafficTypeLabel(t.type)}</TableCell>
                         <TableCell className="text-sm">
                           {t.streamName}
-                          <div className="text-xs text-muted-foreground font-mono truncate max-w-[240px]">
-                            {t.streamUrl ?? ""}
-                          </div>
+                          <div className="text-xs text-muted-foreground font-mono truncate max-w-[240px]">{t.streamUrl ?? ""}</div>
                         </TableCell>
                         <TableCell className="text-sm">{t.message}</TableCell>
                       </TableRow>
