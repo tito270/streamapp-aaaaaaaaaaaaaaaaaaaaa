@@ -1,7 +1,6 @@
 import React, { useRef, useState, useEffect, useCallback } from "react";
 import Hls from "hls.js";
 import {
-  X,
   AlertCircle,
   Play,
   Pause,
@@ -22,12 +21,10 @@ interface VideoPlayerProps {
   streamUrl: string;
   resolution: string;
   onResolutionChange: (streamId: string, newResolution: string) => void;
-  onRemove: () => void;
   reloadSignal?: number;
   status?: "online" | "offline";
   onBitrateUpdate?: (streamId: string, bitrate: number | null) => void;
   className?: string;
-  canRemove?: boolean;
 
   // ✅ Traffic events (real-time diagnostics)
   onTrafficEvent?: (evt: {
@@ -67,13 +64,11 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
   streamName,
   streamUrl,
   resolution,
-  onRemove,
   reloadSignal,
   status,
   onBitrateUpdate,
   onTrafficEvent,
   className,
-  canRemove = true,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -463,8 +458,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     const onWaiting = () =>
       emitTraffic("BUFFERING", "Video waiting (buffering)", "info");
     const onStalled = () => emitTraffic("BUFFERING", "Video stalled", "warn");
-    const onPlaying = () =>
-      emitTraffic("RECOVERED", "Playback resumed", "info");
+    const onPlaying = () => emitTraffic("RECOVERED", "Playback resumed", "info");
 
     v.addEventListener("waiting", onWaiting);
     v.addEventListener("stalled", onStalled);
@@ -478,7 +472,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
   }, [emitTraffic]);
 
   // ✅ Frozen detector (currentTime not advancing)
-  const freezeRef = useRef({ lastT: 0, stuck: 0, wasFrozen: false });
+  const freezeRef = useRef({ lastT: 0, stuck: 0 });
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -496,22 +490,16 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
 
       freezeRef.current.lastT = t;
 
-      if (freezeRef.current.stuck >= 8 && !freezeRef.current.wasFrozen) {
-        freezeRef.current.wasFrozen = true;
+      if (freezeRef.current.stuck === 8) {
         emitTraffic("FROZEN", "Video currentTime not advancing for ~8s", "warn");
-      }
-
-      if (diff >= 0.05 && freezeRef.current.wasFrozen) {
-        freezeRef.current.wasFrozen = false;
-        emitTraffic("RECOVERED", "Video recovered from frozen state", "info");
       }
     }, 1000);
 
     return () => clearInterval(id);
   }, [hasError, isLoading, emitTraffic]);
 
-  // ✅ Silent audio detector (FIXED: do NOT skip when muted, because you autoplay muted)
-  const silenceRef = useRef({ hits: 0, wasSilent: false, warmup: 0 });
+  // ✅ Silent audio detector
+  const silenceRef = useRef({ hits: 0 });
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -521,37 +509,30 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
       if (v.paused) return;
       if (v.readyState < 2) return;
 
-      // warmup few seconds after start (avoid immediate false positives)
-      if (silenceRef.current.warmup < 5) {
-        silenceRef.current.warmup += 1;
-        return;
-      }
+      // If you want to detect silence even when muted, remove this line:
+      if (v.muted) return;
 
       const avg = (audioLevels.left + audioLevels.right) / 2;
-
-      // your hook outputs 0..1
-      const SILENCE_THRESHOLD = 0.006; // tune if needed
+      const SILENCE_THRESHOLD = 0.01;
 
       if (avg < SILENCE_THRESHOLD) silenceRef.current.hits += 1;
       else silenceRef.current.hits = 0;
 
-      if (silenceRef.current.hits >= 10 && !silenceRef.current.wasSilent) {
-        silenceRef.current.wasSilent = true;
-        emitTraffic("SILENT", "Audio appears silent for ~10s", "warn");
-      }
-
-      if (avg >= SILENCE_THRESHOLD && silenceRef.current.wasSilent) {
-        silenceRef.current.wasSilent = false;
-        emitTraffic("RECOVERED", "Audio recovered after silence", "info");
+      if (silenceRef.current.hits === 10) {
+        emitTraffic(
+          "SILENT",
+          "Audio appears silent for ~10s while playback is active",
+          "warn"
+        );
       }
     }, 1000);
 
     return () => clearInterval(id);
   }, [hasError, isLoading, emitTraffic, audioLevels.left, audioLevels.right]);
 
-  // ✅ Black frame detector (best-effort; may fail if canvas is tainted by CORS)
+  // ✅ Black frame detector (best-effort; CORS can block canvas reads)
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const blackRef = useRef({ hits: 0, wasBlack: false });
+  const blackRef = useRef({ hits: 0 });
 
   useEffect(() => {
     const c = document.createElement("canvas");
@@ -587,9 +568,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
         if (avgBrightness < 12) blackRef.current.hits += 1;
         else blackRef.current.hits = 0;
 
-        if (blackRef.current.hits >= 5 && !blackRef.current.wasBlack) {
-          blackRef.current.wasBlack = true;
-
+        if (blackRef.current.hits === 5) {
           const audioAvg = (audioLevels.left + audioLevels.right) / 2;
           const audioPresent = audioAvg > 0.03;
 
@@ -597,17 +576,12 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
             "BLACK",
             audioPresent
               ? "Frame is black while audio is present"
-              : "Frame is black (low brightness)",
+              : "Frame is black (low brightness for ~10s)",
             audioPresent ? "critical" : "warn"
           );
         }
-
-        if (avgBrightness >= 20 && blackRef.current.wasBlack) {
-          blackRef.current.wasBlack = false;
-          emitTraffic("RECOVERED", "Video recovered from black screen", "info");
-        }
       } catch {
-        // canvas read blocked by CORS → ignore
+        // canvas blocked by CORS → ignore
       }
     }, 2000);
 
@@ -625,17 +599,6 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
       onMouseEnter={() => setShowControls(true)}
       onMouseLeave={() => setShowControls(false)}
     >
-      {canRemove && (
-        <Button
-          onClick={onRemove}
-          variant="destructive"
-          size="sm"
-          className="absolute top-2 right-2 z-10 opacity-0 group-hover:opacity-100"
-        >
-          <X className="h-4 w-4" />
-        </Button>
-      )}
-
       <div
         className={cn(
           "absolute top-1 left-2 z-10 px-2 py-0.2 rounded text-xs font-semibold flex items-center gap-2",
@@ -646,7 +609,9 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
             : "bg-primary/90"
         )}
       >
-        <span className="text-[10px] text-white">{status ?? computedStatus}</span>
+        <span className="text-[10px] text-white">
+          {status ?? computedStatus}
+        </span>
       </div>
 
       <AudioMeter
@@ -699,7 +664,11 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
                 size="sm"
                 className="text-white hover:bg-white/20"
               >
-                {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                {isPlaying ? (
+                  <Pause className="h-4 w-4" />
+                ) : (
+                  <Play className="h-4 w-4" />
+                )}
               </Button>
 
               <Button
@@ -708,7 +677,11 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
                 size="sm"
                 className="text-white hover:bg-white/20"
               >
-                {isMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+                {isMuted ? (
+                  <VolumeX className="h-4 w-4" />
+                ) : (
+                  <Volume2 className="h-4 w-4" />
+                )}
               </Button>
 
               <Button
@@ -721,7 +694,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
               </Button>
 
               <Button
-                onClick={forceReload}
+                onClick={() => setReloadKey((p) => p + 1)}
                 variant="ghost"
                 size="sm"
                 className="text-white hover:bg-white/20"
@@ -735,7 +708,9 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
         <div className="p-3 bg-stream-bg border-t border-stream-border">
           <div className="min-w-0">
             <p className="text-sm font-semibold truncate">{streamName}</p>
-            <p className="text-xs text-muted-foreground font-mono truncate">{streamUrl}</p>
+            <p className="text-xs text-muted-foreground font-mono truncate">
+              {streamUrl}
+            </p>
           </div>
         </div>
       </div>
