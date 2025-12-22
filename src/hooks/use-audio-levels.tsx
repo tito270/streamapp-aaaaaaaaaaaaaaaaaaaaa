@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface WindowWithAudioContext extends Window {
   webkitAudioContext: typeof AudioContext;
@@ -8,12 +8,12 @@ export const useAudioLevels = (videoRef: React.RefObject<HTMLVideoElement>) => {
   const [audioLevels, setAudioLevels] = useState({ left: 0, right: 0 });
 
   const audioContextRef = useRef<AudioContext | null>(null);
+  const sourceRef = useRef<MediaElementAudioSourceNode | null>(null);
+
   const analyserLRef = useRef<AnalyserNode | null>(null);
   const analyserRRef = useRef<AnalyserNode | null>(null);
-  const animationFrameId = useRef<number>(0);
 
-  // ✅ prevent "MediaElementSource already created for this element"
-  const sourceRef = useRef<MediaElementAudioSourceNode | null>(null);
+  const animationFrameId = useRef<number>(0);
 
   useEffect(() => {
     const videoElement = videoRef.current;
@@ -27,7 +27,7 @@ export const useAudioLevels = (videoRef: React.RefObject<HTMLVideoElement>) => {
 
       const audioContext = audioContextRef.current;
 
-      // ✅ Source only once per element
+      // IMPORTANT: createMediaElementSource can be called only once per <video>
       if (!sourceRef.current) {
         sourceRef.current = audioContext.createMediaElementSource(videoElement);
       }
@@ -35,6 +35,7 @@ export const useAudioLevels = (videoRef: React.RefObject<HTMLVideoElement>) => {
       const source = sourceRef.current;
 
       const splitter = audioContext.createChannelSplitter(2);
+      const merger = audioContext.createChannelMerger(2);
 
       analyserLRef.current = audioContext.createAnalyser();
       analyserRRef.current = audioContext.createAnalyser();
@@ -45,17 +46,24 @@ export const useAudioLevels = (videoRef: React.RefObject<HTMLVideoElement>) => {
       analyserL.fftSize = 32;
       analyserR.fftSize = 32;
 
+      // wiring
       source.connect(splitter);
+
+      // left channel
       splitter.connect(analyserL, 0);
-      splitter.connect(analyserR, 1);
 
-      // ✅ silent sink to keep graph alive but no audible output
-      const gain = audioContext.createGain();
-      gain.gain.value = 0;
+      // right channel may not exist → fallback to left
+      try {
+        splitter.connect(analyserR, 1);
+      } catch {
+        splitter.connect(analyserR, 0);
+      }
 
-      analyserL.connect(gain);
-      analyserR.connect(gain);
-      gain.connect(audioContext.destination);
+      analyserL.connect(merger, 0, 0);
+      analyserR.connect(merger, 0, 1);
+
+      // If you don't want audio output, comment next line.
+      merger.connect(audioContext.destination);
 
       const dataArrayL = new Uint8Array(analyserL.frequencyBinCount);
       const dataArrayR = new Uint8Array(analyserR.frequencyBinCount);
@@ -65,64 +73,39 @@ export const useAudioLevels = (videoRef: React.RefObject<HTMLVideoElement>) => {
         analyserR.getByteFrequencyData(dataArrayR);
 
         const leftLevel =
-          dataArrayL.reduce((sum, val) => sum + val, 0) /
-          dataArrayL.length /
-          255;
-
+          dataArrayL.reduce((sum, val) => sum + val, 0) / dataArrayL.length / 255;
         const rightLevel =
-          dataArrayR.reduce((sum, val) => sum + val, 0) /
-          dataArrayR.length /
-          255;
+          dataArrayR.reduce((sum, val) => sum + val, 0) / dataArrayR.length / 255;
 
-        setAudioLevels({
-          left: Number.isFinite(leftLevel) ? leftLevel : 0,
-          right: Number.isFinite(rightLevel) ? rightLevel : 0,
-        });
-
+        setAudioLevels({ left: leftLevel, right: rightLevel });
         animationFrameId.current = requestAnimationFrame(updateLevels);
       };
 
       updateLevels();
     };
 
-    const tryResume = async () => {
-      try {
-        if (audioContextRef.current?.state === "suspended") {
-          await audioContextRef.current.resume();
-        }
-      } catch {
-        // ignore
-      }
-    };
-
     const cleanup = () => {
       cancelAnimationFrame(animationFrameId.current);
-      try {
-        analyserLRef.current?.disconnect();
-        analyserRRef.current?.disconnect();
-      } catch {}
 
-      analyserLRef.current = null;
-      analyserRRef.current = null;
-
-      // Close context (ok per-player)
+      // keep audio context open across rerenders? you had close().
+      // closing is fine, but it will require user gesture to resume on some browsers.
       if (audioContextRef.current && audioContextRef.current.state !== "closed") {
         audioContextRef.current.close();
       }
       audioContextRef.current = null;
       sourceRef.current = null;
+      analyserLRef.current = null;
+      analyserRRef.current = null;
     };
 
-    videoElement.addEventListener("canplay", tryResume);
-    // Some browsers require gesture for audio graph
-    document.addEventListener("click", tryResume, { once: true });
+    videoElement.oncanplay = () => {
+      if (audioContextRef.current && audioContextRef.current.state === "suspended") {
+        audioContextRef.current.resume().catch(() => {});
+      }
+    };
 
     setupAudioContext();
-
-    return () => {
-      videoElement.removeEventListener("canplay", tryResume);
-      cleanup();
-    };
+    return cleanup;
   }, [videoRef]);
 
   return audioLevels;
