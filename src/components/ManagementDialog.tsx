@@ -19,7 +19,7 @@ import { supabase } from "@/integrations/supabase/client";
 interface ManagementDialogProps {
   isOpen: boolean;
   onClose: () => void;
-  onStreamsChanged?: () => void; // ✅ keep
+  onStreamsChanged?: () => void;
 }
 
 type DbStreamRow = {
@@ -27,7 +27,6 @@ type DbStreamRow = {
   user_id: string;
   name: string;
   url: string;
-  resolution: string | null;
   color: string | null;
 };
 
@@ -104,9 +103,10 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose, on
         return;
       }
 
+      // ✅ resolution removed from select
       const { data, error } = await supabase
         .from("streams")
-        .select("id, user_id, name, url, resolution, color")
+        .select("id, user_id, name, url, color")
         .order("created_at", { ascending: true });
 
       if (error) {
@@ -123,6 +123,7 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose, on
 
   useEffect(() => {
     if (!isOpen) return;
+
     void fetchStreams();
 
     setEditingStreamId(null);
@@ -218,11 +219,7 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose, on
         return;
       }
 
-      const { error: signInErr } = await supabase.auth.signInWithPassword({
-        email,
-        password: pwOld,
-      });
-
+      const { error: signInErr } = await supabase.auth.signInWithPassword({ email, password: pwOld });
       if (signInErr) {
         toast({ title: "Old password incorrect", description: signInErr.message, variant: "destructive" });
         return;
@@ -251,7 +248,6 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose, on
         <DialogHeader className="sticky top-0 bg-background z-10 pb-2">
           <div className="flex items-center justify-between gap-3">
             <DialogTitle>Settings</DialogTitle>
-
           </div>
         </DialogHeader>
 
@@ -303,9 +299,7 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose, on
                 {pwLoading ? "Saving..." : "Save Password"}
               </Button>
               {!canSavePw && (
-                <span className="text-xs text-muted-foreground">
-                  New password must match and be at least 6 characters.
-                </span>
+                <span className="text-xs text-muted-foreground">New password must match and be at least 6 characters.</span>
               )}
             </div>
           </section>
@@ -363,7 +357,7 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose, on
                           </div>
 
                           <p className="text-xs text-muted-foreground">
-                            Tip: For best results in Lovable without backend, use HLS (.m3u8) streams.
+                            Tip: For best results without backend, use HLS (.m3u8) streams.
                           </p>
                         </div>
                       )}
@@ -380,9 +374,7 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose, on
           <AlertDialogContent>
             <AlertDialogHeader>
               <AlertDialogTitle>Delete stream?</AlertDialogTitle>
-              <AlertDialogDescription>
-                This action cannot be undone. The stream will be permanently removed.
-              </AlertDialogDescription>
+              <AlertDialogDescription>This action cannot be undone. The stream will be permanently removed.</AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel>Cancel</AlertDialogCancel>
