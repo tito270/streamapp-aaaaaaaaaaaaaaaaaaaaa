@@ -1,4 +1,3 @@
-// StreamManager.tsx
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { VideoPlayer } from "./VideoPlayer";
 import { RotateCcw, Plus, Monitor, Save, LogOut, Settings, Download } from "lucide-react";
