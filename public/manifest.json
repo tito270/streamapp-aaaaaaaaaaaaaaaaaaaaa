@@ -2,12 +2,13 @@
   "name": "StreamWall",
   "short_name": "StreamWall",
   "description": "All Streams. One Wall.",
-  "start_url": "/",
+  "start_url": "/?source=pwa",
   "scope": "/",
   "display": "standalone",
+  "display_override": ["standalone"],
   "background_color": "#0b1220",
   "theme_color": "#0b1220",
-  "orientation": "landscape",
+  "orientation": "portrait",
   "icons": [
     {
       "src": "/icons/icon-192.png",
