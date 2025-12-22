@@ -1,22 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/use-toast";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -32,6 +19,7 @@ import { supabase } from "@/integrations/supabase/client";
 interface ManagementDialogProps {
   isOpen: boolean;
   onClose: () => void;
+  onStreamsChanged?: () => void; // ✅ keep
 }
 
 type DbStreamRow = {
@@ -43,49 +31,9 @@ type DbStreamRow = {
   color: string | null;
 };
 
-type DbActivityLog = {
-  id: string;
-  created_at: string;
-  actor_email: string | null;
-  action: string;
-  target_type: string | null;
-  target_name: string | null;
-  description: string | null;
-  // ✅ details intentionally NOT included / NOT shown
-};
-
-const formatDateTime = (iso: string) => {
-  try {
-    const d = new Date(iso);
-    // yyyy-mm-dd hh:mm:ss
-    const yyyy = d.getFullYear();
-    const mm = String(d.getMonth() + 1).padStart(2, "0");
-    const dd = String(d.getDate()).padStart(2, "0");
-    const hh = String(d.getHours()).padStart(2, "0");
-    const mi = String(d.getMinutes()).padStart(2, "0");
-    const ss = String(d.getSeconds()).padStart(2, "0");
-    return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
-  } catch {
-    return iso;
-  }
-};
-
-const actionLabel = (a: string) => {
-  const x = (a || "").toLowerCase();
-  if (x === "add_stream") return "Add Stream";
-  if (x === "delete_stream") return "Delete Stream";
-  if (x === "edit_stream") return "Edit Stream";
-  if (x === "save_list") return "Save List";
-  if (x === "load_list") return "Load List";
-  if (x === "change_password") return "Change Password";
-  if (x === "login") return "Login";
-  if (x === "logout") return "Logout";
-  return a;
-};
-
 const safeTrim = (v: string) => v.trim().replace(/\s+/g, " ");
 
-const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose }) => {
+const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose, onStreamsChanged }) => {
   const { toast } = useToast();
 
   // --- Streams (edit) ---
@@ -102,11 +50,6 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose }) 
   const [pwNew, setPwNew] = useState("");
   const [pwConfirm, setPwConfirm] = useState("");
   const [pwLoading, setPwLoading] = useState(false);
-
-  // --- Activity logs (timeline table) ---
-  const [logs, setLogs] = useState<DbActivityLog[]>([]);
-  const [logsLoading, setLogsLoading] = useState(false);
-  const [logsLimit, setLogsLimit] = useState(200);
 
   const canSavePw = useMemo(() => {
     if (!pwOld || !pwNew || !pwConfirm) return false;
@@ -128,7 +71,6 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose }) 
   };
 
   const getActorEmail = async (): Promise<string> => {
-    // Prefer auth user email (most reliable)
     const { data, error } = await supabase.auth.getUser();
     if (!error) return data.user?.email ?? "unknown";
     return "unknown";
@@ -146,7 +88,6 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose }) 
           description,
         });
       } catch (e) {
-        // non-blocking
         console.warn("activity_logs insert failed:", e);
       }
     },
@@ -180,40 +121,16 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose }) 
     }
   }, [toast]);
 
-  const fetchLogs = useCallback(async () => {
-    setLogsLoading(true);
-    try {
-      const { data, error } = await supabase
-        .from("activity_logs")
-        // ✅ details intentionally NOT selected
-        .select("id, created_at, actor_email, action, target_type, target_name, description")
-        .order("created_at", { ascending: false })
-        .limit(logsLimit);
-
-      if (error) {
-        toast({ title: "Failed to load activity logs", description: error.message, variant: "destructive" });
-        setLogs([]);
-        return;
-      }
-
-      setLogs((data || []) as DbActivityLog[]);
-    } finally {
-      setLogsLoading(false);
-    }
-  }, [logsLimit, toast]);
-
   useEffect(() => {
     if (!isOpen) return;
     void fetchStreams();
-    void fetchLogs();
 
-    // reset state each open (optional)
     setEditingStreamId(null);
     setConfirmDeleteStreamId(null);
     setPwOld("");
     setPwNew("");
     setPwConfirm("");
-  }, [isOpen, fetchStreams, fetchLogs]);
+  }, [isOpen, fetchStreams]);
 
   const beginEditStream = (s: DbStreamRow) => {
     setEditingStreamId(s.id);
@@ -250,27 +167,19 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose }) 
     const existing = streams.find((x) => x.id === streamId);
     const before = existing ? `${existing.name} — ${existing.url}` : "stream";
 
-    const { error } = await supabase
-      .from("streams")
-      .update({ name, url })
-      .eq("id", streamId);
+    const { error } = await supabase.from("streams").update({ name, url }).eq("id", streamId);
 
     if (error) {
       toast({ title: "Failed to update stream", description: error.message, variant: "destructive" });
       return;
     }
 
-    await insertActivity(
-      "edit_stream",
-      "stream",
-      name,
-      `Updated stream: ${before} -> ${name} — ${url}`
-    );
+    await insertActivity("edit_stream", "stream", name, `Updated stream: ${before} -> ${name} — ${url}`);
 
     toast({ title: "Stream updated" });
     cancelEditStream();
     await fetchStreams();
-    await fetchLogs();
+    onStreamsChanged?.();
   };
 
   const deleteStream = async (streamId: string) => {
@@ -289,14 +198,9 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose }) 
 
     setConfirmDeleteStreamId(null);
     await fetchStreams();
-    await fetchLogs();
+    onStreamsChanged?.();
   };
 
-  /**
-   * ✅ Change password with old password verification:
-   * Supabase requires re-auth to validate the old password.
-   * We sign in with current email + old password, then update password.
-   */
   const handleChangePassword = async () => {
     if (!canSavePw) return;
 
@@ -314,7 +218,6 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose }) 
         return;
       }
 
-      // Re-auth by signing in with old password (validates it)
       const { error: signInErr } = await supabase.auth.signInWithPassword({
         email,
         password: pwOld,
@@ -325,7 +228,6 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose }) 
         return;
       }
 
-      // Update password
       const { error: updErr } = await supabase.auth.updateUser({ password: pwNew });
       if (updErr) {
         toast({ title: "Failed to change password", description: updErr.message, variant: "destructive" });
@@ -338,15 +240,10 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose }) 
       setPwOld("");
       setPwNew("");
       setPwConfirm("");
-      await fetchLogs();
     } finally {
       setPwLoading(false);
     }
   };
-
-  const logsRangeLabel = useMemo(() => {
-    return logsLimit === 50 ? "Last 50" : logsLimit === 200 ? "Last 200" : "Last 500";
-  }, [logsLimit]);
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
@@ -356,23 +253,11 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose }) 
             <DialogTitle>Settings</DialogTitle>
 
             <div className="flex items-center gap-2">
-              <Label className="text-xs text-muted-foreground">Logs:</Label>
-              <select
-                className="h-9 rounded-md border bg-background px-3 text-sm"
-                value={String(logsLimit)}
-                onChange={(e) => setLogsLimit(Number(e.target.value) as any)}
-              >
-                <option value="50">Last 50</option>
-                <option value="200">Last 200</option>
-                <option value="500">Last 500</option>
-              </select>
-
               <Button
                 variant="outline"
                 size="sm"
                 onClick={() => {
                   void fetchStreams();
-                  void fetchLogs();
                 }}
               >
                 Refresh
@@ -463,11 +348,7 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose }) 
                             <Button variant="outline" size="sm" onClick={() => beginEditStream(s)}>
                               Edit
                             </Button>
-                            <Button
-                              variant="destructive"
-                              size="sm"
-                              onClick={() => setConfirmDeleteStreamId(s.id)}
-                            >
+                            <Button variant="destructive" size="sm" onClick={() => setConfirmDeleteStreamId(s.id)}>
                               Delete
                             </Button>
                           </div>
@@ -503,67 +384,10 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose }) 
               )}
             </div>
           </section>
-
-          {/* ✅ Activity Logs (Timeline Style - Table) */}
-          <section className="rounded-xl border p-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <h3 className="text-lg font-semibold">Activity Logs</h3>
-                <p className="text-xs text-muted-foreground">Timeline style (Table Format) — {logsRangeLabel}</p>
-              </div>
-
-              <div className="flex items-center gap-2">
-                {logsLoading && <span className="text-sm text-muted-foreground">Loading…</span>}
-                <Button variant="outline" size="sm" onClick={() => void fetchLogs()}>
-                  Refresh Logs
-                </Button>
-              </div>
-            </div>
-
-            <div className="mt-3 rounded-lg border overflow-hidden">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="w-[190px]">Time</TableHead>
-                    <TableHead className="w-[220px]">User</TableHead>
-                    <TableHead className="w-[180px]">Action</TableHead>
-                    <TableHead className="w-[220px]">Target</TableHead>
-                    <TableHead>Description</TableHead>
-                    {/* ✅ Details column removed */}
-                  </TableRow>
-                </TableHeader>
-
-                <TableBody>
-                  {logs.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={5} className="text-sm text-muted-foreground py-6 text-center">
-                        No activity logs yet.
-                      </TableCell>
-                    </TableRow>
-                  ) : (
-                    logs.map((l) => (
-                      <TableRow key={l.id}>
-                        <TableCell className="text-xs font-mono">{formatDateTime(l.created_at)}</TableCell>
-                        <TableCell className="text-sm">{l.actor_email || "unknown"}</TableCell>
-                        <TableCell className="text-sm font-semibold">{actionLabel(l.action)}</TableCell>
-                        <TableCell className="text-sm">
-                          {(l.target_type || "—") + (l.target_name ? ` — ${l.target_name}` : "")}
-                        </TableCell>
-                        <TableCell className="text-sm">{l.description || "—"}</TableCell>
-                      </TableRow>
-                    ))
-                  )}
-                </TableBody>
-              </Table>
-            </div>
-          </section>
         </div>
 
         {/* Delete stream confirmation */}
-        <AlertDialog
-          open={!!confirmDeleteStreamId}
-          onOpenChange={(open) => !open && setConfirmDeleteStreamId(null)}
-        >
+        <AlertDialog open={!!confirmDeleteStreamId} onOpenChange={(open) => !open && setConfirmDeleteStreamId(null)}>
           <AlertDialogContent>
             <AlertDialogHeader>
               <AlertDialogTitle>Delete stream?</AlertDialogTitle>
@@ -573,9 +397,7 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose }) 
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <AlertDialogAction
-                onClick={() => confirmDeleteStreamId && void deleteStream(confirmDeleteStreamId)}
-              >
+              <AlertDialogAction onClick={() => confirmDeleteStreamId && void deleteStream(confirmDeleteStreamId)}>
                 Continue
               </AlertDialogAction>
             </AlertDialogFooter>
