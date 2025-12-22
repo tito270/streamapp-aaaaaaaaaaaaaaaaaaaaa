@@ -1,3 +1,4 @@
+// StreamManager.tsx
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { VideoPlayer } from "./VideoPlayer";
 import { RotateCcw, Plus, Monitor, Save, LogOut, Settings, Download } from "lucide-react";
@@ -24,7 +25,6 @@ type DbStreamRow = {
   user_id: string;
   name: string;
   url: string;
-  resolution: string | null;
   color: string | null;
 };
 
@@ -33,7 +33,6 @@ interface Stream {
   name: string;
   url: string;
   color: string;
-  resolution: string;
 }
 
 interface AllBitrateDataPoint {
@@ -185,11 +184,10 @@ export const StreamManager: React.FC = () => {
   const [streams, setStreams] = useState<Stream[]>([]);
   const [streamName, setStreamName] = useState("");
   const [streamUrl, setStreamUrl] = useState("");
-  const [resolution, setResolution] = useState("480p");
 
   const [currentTime, setCurrentTime] = useState(new Date());
 
-  // ✅ START DEFAULT GRID = 6 columns
+  // ✅ DEFAULT GRID = 6 columns
   const [gridLayout, setGridLayout] = useState<"3-2" | "4-2" | "6-2">("6-2");
 
   const [allBitrateHistory, setAllBitrateHistory] = useState<AllBitrateDataPoint[]>([]);
@@ -230,8 +228,7 @@ export const StreamManager: React.FC = () => {
     return new Date(now - ms).toISOString();
   };
 
-  const makeRangeLabel = (range: DownloadRange) =>
-    range === "1h" ? "last_1_hour" : range === "24h" ? "last_24_hours" : "all_time";
+  const makeRangeLabel = (range: DownloadRange) => (range === "1h" ? "last_1_hour" : range === "24h" ? "last_24_hours" : "all_time");
 
   const logsRangeLabel = useMemo(() => {
     return logsLimit === 50 ? "Last 50" : logsLimit === 200 ? "Last 200" : "Last 500";
@@ -385,14 +382,7 @@ export const StreamManager: React.FC = () => {
   // --------- URL validation ----------
   const isValidStreamUrl = (url: string): boolean => {
     const lowerUrl = url.trim().toLowerCase();
-    return (
-      lowerUrl.startsWith("http://") ||
-      lowerUrl.startsWith("https://") ||
-      lowerUrl.includes(".m3u8") ||
-      lowerUrl.startsWith("rtmp://") ||
-      lowerUrl.startsWith("rtsp://") ||
-      lowerUrl.startsWith("udp://")
-    );
+    return lowerUrl.startsWith("http://") || lowerUrl.startsWith("https://") || lowerUrl.includes(".m3u8") || lowerUrl.startsWith("rtmp://") || lowerUrl.startsWith("rtsp://") || lowerUrl.startsWith("udp://");
   };
 
   // --------- Load streams from DB ----------
@@ -401,10 +391,7 @@ export const StreamManager: React.FC = () => {
     const authUser = authData?.user;
     if (!authUser) return;
 
-    const { data, error } = await supabase
-      .from("streams")
-      .select("id, user_id, name, url, resolution, color")
-      .order("created_at", { ascending: true });
+    const { data, error } = await supabase.from("streams").select("id, user_id, name, url, color").order("created_at", { ascending: true });
 
     if (error) {
       toast({ title: "Failed to load streams", description: error.message, variant: "destructive" });
@@ -415,7 +402,6 @@ export const StreamManager: React.FC = () => {
       id: row.id,
       name: row.name,
       url: row.url,
-      resolution: row.resolution || "480p",
       color: row.color || streamColors[idx % streamColors.length],
     }));
 
@@ -476,7 +462,6 @@ export const StreamManager: React.FC = () => {
   // =========================
   // ✅ TRAFFIC: DB -> UI + REALTIME
   // =========================
-
   const toTrafficEvent = useCallback((r: TrafficLogRow): TrafficEvent => {
     return {
       ts: r.created_at ? new Date(r.created_at).getTime() : Date.now(),
@@ -489,7 +474,7 @@ export const StreamManager: React.FC = () => {
     };
   }, []);
 
-  // Dedup to avoid "UI push" + "Realtime insert" duplicates
+  // Dedup to avoid duplicates (UI push + realtime insert)
   const trafficSeenRef = useRef<Set<string>>(new Set());
   const makeTrafficKey = (e: TrafficEvent) => `${e.ts}|${e.streamId}|${e.type}|${e.severity}|${e.message}`;
 
@@ -518,13 +503,11 @@ export const StreamManager: React.FC = () => {
     setTraffic(mapped);
   }, [trafficLimit, toast, toTrafficEvent]);
 
-  // Load DB traffic when Traffic tab opens
   useEffect(() => {
     if (activeTab !== "traffic") return;
     void fetchTrafficFromDb();
   }, [activeTab, fetchTrafficFromDb]);
 
-  // Realtime subscription (INSERT)
   useEffect(() => {
     if (activeTab !== "traffic") return;
 
@@ -540,12 +523,7 @@ export const StreamManager: React.FC = () => {
         .channel(`traffic_logs_rt_${authUser.id}`)
         .on(
           "postgres_changes",
-          {
-            event: "INSERT",
-            schema: "public",
-            table: "traffic_logs",
-            filter: `user_id=eq.${authUser.id}`,
-          },
+          { event: "INSERT", schema: "public", table: "traffic_logs", filter: `user_id=eq.${authUser.id}` },
           (payload) => {
             if (!alive) return;
             if (trafficPaused) return;
@@ -572,34 +550,17 @@ export const StreamManager: React.FC = () => {
   }, [activeTab, trafficPaused, trafficLimit, toTrafficEvent]);
 
   // --------- ✅ Traffic events handler (from VideoPlayer) ----------
-  // (keeps instant UI + inserts to DB; dedupe prevents double when realtime insert arrives)
   const handleTrafficEvent = useCallback(
-    async (evt: {
-      ts?: number;
-      streamId: string;
-      streamName: string;
-      type: TrafficEventType;
-      message: string;
-      severity?: TrafficSeverity;
-    }) => {
+    async (evt: { ts?: number; streamId: string; streamName: string; type: TrafficEventType; message: string; severity?: TrafficSeverity }) => {
       const ts = evt.ts ?? Date.now();
       const severity = evt.severity ?? "info";
 
       const stream = streams.find((s) => s.id === evt.streamId);
       const streamUrl = stream?.url ?? null;
 
-      // 1) Push to realtime UI list (unless paused)
+      // 1) Push to UI
       if (!trafficPaused) {
-        const uiEvt: TrafficEvent = {
-          ts,
-          streamId: evt.streamId,
-          streamName: evt.streamName,
-          streamUrl: streamUrl ?? undefined,
-          type: evt.type,
-          message: evt.message,
-          severity,
-        };
-
+        const uiEvt: TrafficEvent = { ts, streamId: evt.streamId, streamName: evt.streamName, streamUrl: streamUrl ?? undefined, type: evt.type, message: evt.message, severity };
         const key = makeTrafficKey(uiEvt);
         if (!trafficSeenRef.current.has(key)) {
           trafficSeenRef.current.add(key);
@@ -665,14 +626,8 @@ export const StreamManager: React.FC = () => {
 
     const { data, error } = await supabase
       .from("streams")
-      .insert({
-        user_id: authUser.id,
-        name: nameToAdd,
-        url: urlToAdd,
-        resolution,
-        color,
-      })
-      .select("id, name, url, resolution, color")
+      .insert({ user_id: authUser.id, name: nameToAdd, url: urlToAdd, color })
+      .select("id, name, url, color")
       .single();
 
     if (error) {
@@ -680,13 +635,7 @@ export const StreamManager: React.FC = () => {
       return;
     }
 
-    const inserted: Stream = {
-      id: data.id,
-      name: data.name,
-      url: data.url,
-      resolution: data.resolution || resolution,
-      color: data.color || color,
-    };
+    const inserted: Stream = { id: data.id, name: data.name, url: data.url, color: data.color || color };
 
     setStreams((prev) => [...prev, inserted]);
     setStreamName("");
@@ -701,7 +650,7 @@ export const StreamManager: React.FC = () => {
       target_name: inserted.name,
       description: "Stream added",
     });
-  }, [streamUrl, streams, streamName, resolution, toast, logActivity]);
+  }, [streamUrl, streams, streamName, toast, logActivity]);
 
   // --------- Save list to file ----------
   const saveListToFile = useCallback(() => {
@@ -779,11 +728,10 @@ export const StreamManager: React.FC = () => {
           user_id: authUser.id,
           name: s.name,
           url: s.url,
-          resolution,
           color: streamColors[(streams.length + i) % streamColors.length],
         }));
 
-        const { data, error } = await supabase.from("streams").insert(rows).select("id, name, url, resolution, color");
+        const { data, error } = await supabase.from("streams").insert(rows).select("id, name, url, color");
 
         if (error) {
           toast({ title: "Failed to import list", description: error.message, variant: "destructive" });
@@ -794,7 +742,6 @@ export const StreamManager: React.FC = () => {
           id: r.id,
           name: r.name,
           url: r.url,
-          resolution: r.resolution || resolution,
           color: r.color || streamColors[(streams.length + idx) % streamColors.length],
         }));
 
@@ -811,7 +758,7 @@ export const StreamManager: React.FC = () => {
         event.target.value = "";
       }
     },
-    [streams, resolution, toast, logActivity]
+    [streams, toast, logActivity]
   );
 
   // --------- Download bitrate CSV ----------
@@ -825,12 +772,7 @@ export const StreamManager: React.FC = () => {
 
     const sinceIso = getSinceIso(downloadRange);
 
-    let q = supabase
-      .from("bitrate_logs")
-      .select("created_at, stream_name, stream_url, bitrate_mbps")
-      .eq("user_id", authUser.id)
-      .order("created_at", { ascending: true });
-
+    let q = supabase.from("bitrate_logs").select("created_at, stream_name, stream_url, bitrate_mbps").eq("user_id", authUser.id).order("created_at", { ascending: true });
     if (sinceIso) q = q.gte("created_at", sinceIso);
 
     const { data, error } = await q;
@@ -856,9 +798,7 @@ export const StreamManager: React.FC = () => {
     const csv =
       header.join(",") +
       "\n" +
-      rows
-        .map((r) => [r.created_at, r.stream_name, r.stream_url, formatMbps(Number(r.bitrate_mbps ?? 0))].map(escape).join(","))
-        .join("\n");
+      rows.map((r) => [r.created_at, r.stream_name, r.stream_url, formatMbps(Number(r.bitrate_mbps ?? 0))].map(escape).join(",")).join("\n");
 
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -870,12 +810,7 @@ export const StreamManager: React.FC = () => {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
 
-    void logActivity({
-      action: "download_bitrate_csv",
-      target_type: "bitrate_logs",
-      target_name: makeRangeLabel(downloadRange),
-      description: "Downloaded bitrate CSV",
-    });
+    void logActivity({ action: "download_bitrate_csv", target_type: "bitrate_logs", target_name: makeRangeLabel(downloadRange), description: "Downloaded bitrate CSV" });
   }, [downloadRange, toast, logActivity]);
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -929,9 +864,7 @@ export const StreamManager: React.FC = () => {
         {/* Welcome + Email */}
         <div className="flex items-center gap-4">
           <div className="text-left">
-            <div className="text-3xl font-semibold text-foreground mt-[-2px]">
-              {currentTime.toLocaleTimeString([], { hour12: false })}
-            </div>
+            <div className="text-3xl font-semibold text-foreground mt-[-2px]">{currentTime.toLocaleTimeString([], { hour12: false })}</div>
             <div className="text-sm text-muted-foreground">{currentTime.toISOString().slice(0, 10)}</div>
 
             {!!user && (
@@ -973,26 +906,12 @@ export const StreamManager: React.FC = () => {
                     onKeyDown={handleKeyPress}
                     className="w-3/5 bg-input border-stream-border focus:ring-primary"
                   />
-
-                  <Select value={resolution} onValueChange={setResolution}>
-                    <SelectTrigger className="w-[120px] bg-input border-stream-border">
-                      <SelectValue placeholder="Ratio" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="480p">480p</SelectItem>
-                      <SelectItem value="720p">720p</SelectItem>
-                    </SelectContent>
-                  </Select>
                 </div>
               </div>
 
               {/* MENU */}
               <div className="flex flex-wrap items-center gap-2 mt-2">
-                <Button
-                  onClick={() => void addStream()}
-                  disabled={streams.length >= 12}
-                  className="bg-gradient-primary hover:shadow-glow transition-all"
-                >
+                <Button onClick={() => void addStream()} disabled={streams.length >= 12} className="bg-gradient-primary hover:shadow-glow transition-all">
                   <Plus className="h-4 w-4 mr-2" /> Add
                 </Button>
 
@@ -1071,9 +990,7 @@ export const StreamManager: React.FC = () => {
             <CardContent className="flex flex-col items-center justify-center py-16 text-center">
               <Monitor className="h-12 w-12 text-muted-foreground mb-4" />
               <h3 className="text-xl font-semibold mb-2">No streams active</h3>
-              <p className="text-muted-foreground max-w-md">
-                Add your first HLS (.m3u8) URL above to start monitoring. Supports up to 12 concurrent streams.
-              </p>
+              <p className="text-muted-foreground max-w-md">Add your first HLS (.m3u8) URL above to start monitoring. Supports up to 12 concurrent streams.</p>
             </CardContent>
           </Card>
         ) : (
@@ -1095,8 +1012,6 @@ export const StreamManager: React.FC = () => {
                   streamId={stream.id}
                   streamName={stream.name}
                   streamUrl={stream.url}
-                  resolution={stream.resolution}
-                  onResolutionChange={() => {}}
                   reloadSignal={reloadSignals[stream.id] || 0}
                   onBitrateUpdate={(id, br) => void handleBitrateUpdate(id, br)}
                   onTrafficEvent={(evt) => void handleTrafficEvent(evt)}
@@ -1120,11 +1035,7 @@ export const StreamManager: React.FC = () => {
           {activeTab === "logs" && (
             <div className="flex items-center gap-2">
               <Label className="text-xs text-muted-foreground">Logs:</Label>
-              <select
-                className="h-9 rounded-md border bg-background px-3 text-sm"
-                value={String(logsLimit)}
-                onChange={(e) => setLogsLimit(Number(e.target.value) as any)}
-              >
+              <select className="h-9 rounded-md border bg-background px-3 text-sm" value={String(logsLimit)} onChange={(e) => setLogsLimit(Number(e.target.value) as any)}>
                 <option value="50">Last 50</option>
                 <option value="200">Last 200</option>
                 <option value="500">Last 500</option>
@@ -1217,9 +1128,7 @@ export const StreamManager: React.FC = () => {
               <div className="flex items-center justify-between">
                 <div>
                   <h3 className="text-lg font-semibold">Traffic Logs (Real-time)</h3>
-                  <p className="text-xs text-muted-foreground">
-                    Issues: No Signal / Frozen / Black / Silent / Buffering / Error — newest first
-                  </p>
+                  <p className="text-xs text-muted-foreground">Issues: No Signal / Frozen / Black / Silent / Buffering / Error — newest first</p>
                 </div>
                 <div className="text-xs text-muted-foreground">
                   Showing <span className="font-semibold">{filteredTraffic.length}</span> / {traffic.length}
@@ -1229,11 +1138,7 @@ export const StreamManager: React.FC = () => {
               {/* Filters */}
               <div className="flex flex-wrap gap-2 items-center">
                 <Label className="text-xs text-muted-foreground">Type:</Label>
-                <select
-                  className="h-9 rounded-md border bg-background px-3 text-sm"
-                  value={trafficTypeFilter}
-                  onChange={(e) => setTrafficTypeFilter(e.target.value as any)}
-                >
+                <select className="h-9 rounded-md border bg-background px-3 text-sm" value={trafficTypeFilter} onChange={(e) => setTrafficTypeFilter(e.target.value as any)}>
                   <option value="ALL">All</option>
                   <option value="NO_SIGNAL">No Signal</option>
                   <option value="FROZEN">Frozen</option>
@@ -1245,11 +1150,7 @@ export const StreamManager: React.FC = () => {
                 </select>
 
                 <Label className="text-xs text-muted-foreground">Severity:</Label>
-                <select
-                  className="h-9 rounded-md border bg-background px-3 text-sm"
-                  value={trafficSeverityFilter}
-                  onChange={(e) => setTrafficSeverityFilter(e.target.value as any)}
-                >
+                <select className="h-9 rounded-md border bg-background px-3 text-sm" value={trafficSeverityFilter} onChange={(e) => setTrafficSeverityFilter(e.target.value as any)}>
                   <option value="ALL">All</option>
                   <option value="info">Info</option>
                   <option value="warn">Warn</option>
@@ -1257,11 +1158,7 @@ export const StreamManager: React.FC = () => {
                 </select>
 
                 <Label className="text-xs text-muted-foreground">Stream:</Label>
-                <select
-                  className="h-9 rounded-md border bg-background px-3 text-sm"
-                  value={trafficStreamFilter}
-                  onChange={(e) => setTrafficStreamFilter(e.target.value)}
-                >
+                <select className="h-9 rounded-md border bg-background px-3 text-sm" value={trafficStreamFilter} onChange={(e) => setTrafficStreamFilter(e.target.value)}>
                   <option value="ALL">All</option>
                   {streams.map((s) => (
                     <option key={s.id} value={s.id}>
@@ -1271,11 +1168,7 @@ export const StreamManager: React.FC = () => {
                 </select>
 
                 <Label className="text-xs text-muted-foreground">Keep:</Label>
-                <select
-                  className="h-9 rounded-md border bg-background px-3 text-sm"
-                  value={String(trafficLimit)}
-                  onChange={(e) => setTrafficLimit(Number(e.target.value))}
-                >
+                <select className="h-9 rounded-md border bg-background px-3 text-sm" value={String(trafficLimit)} onChange={(e) => setTrafficLimit(Number(e.target.value))}>
                   <option value="200">200</option>
                   <option value="500">500</option>
                   <option value="1000">1000</option>
@@ -1374,9 +1267,7 @@ export const StreamManager: React.FC = () => {
                         <TableCell className="text-xs font-mono">{formatDateTime(l.created_at)}</TableCell>
                         <TableCell className="text-sm">{l.actor_email || "unknown"}</TableCell>
                         <TableCell className="text-sm font-semibold">{actionLabel(l.action)}</TableCell>
-                        <TableCell className="text-sm">
-                          {(l.target_type || "—") + (l.target_name ? ` — ${l.target_name}` : "")}
-                        </TableCell>
+                        <TableCell className="text-sm">{(l.target_type || "—") + (l.target_name ? ` — ${l.target_name}` : "")}</TableCell>
                         <TableCell className="text-sm">{l.description || "—"}</TableCell>
                       </TableRow>
                     ))
