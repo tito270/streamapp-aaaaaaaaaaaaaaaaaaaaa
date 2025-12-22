@@ -106,6 +106,27 @@ type DbActivityLog = {
   description: string | null;
 };
 
+// ✅ Traffic Logs types
+type TrafficType =
+  | "NO_SIGNAL"
+  | "FROZEN"
+  | "BLACK"
+  | "SILENT"
+  | "BUFFERING"
+  | "RECOVERED"
+  | "ERROR";
+
+type TrafficSeverity = "info" | "warn" | "critical";
+
+type TrafficEvent = {
+  ts: number;
+  streamId: string;
+  streamName: string;
+  type: TrafficType;
+  message: string;
+  severity: TrafficSeverity;
+};
+
 const safeTrim = (v: unknown) => String(v ?? "").trim();
 
 const formatDateTime = (iso: string) => {
@@ -162,12 +183,16 @@ export const StreamManager: React.FC = () => {
   const [downloadRange, setDownloadRange] = useState<DownloadRange>("24h");
 
   // ✅ Tabs
-  const [activeTab, setActiveTab] = useState<"bitrate" | "logs">("bitrate");
+  const [activeTab, setActiveTab] = useState<"bitrate" | "traffic" | "logs">("bitrate");
 
-  // ✅ Activity logs moved here
+  // ✅ Activity logs
   const [logs, setLogs] = useState<DbActivityLog[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
   const [logsLimit, setLogsLimit] = useState(200);
+
+  // ✅ Traffic logs (real-time)
+  const [trafficLogs, setTrafficLogs] = useState<TrafficEvent[]>([]);
+  const [trafficLimit, setTrafficLimit] = useState(300);
 
   const normalizeUrl = (url: string) => url.trim().toLowerCase().replace(/\/$/, "");
 
@@ -188,9 +213,38 @@ export const StreamManager: React.FC = () => {
     return logsLimit === 50 ? "Last 50" : logsLimit === 200 ? "Last 200" : "Last 500";
   }, [logsLimit]);
 
+  // ✅ push traffic log
+  const pushTraffic = useCallback(
+    (evt: {
+      ts?: number;
+      streamId: string;
+      streamName: string;
+      type: TrafficType;
+      message: string;
+      severity?: TrafficSeverity;
+    }) => {
+      const e: TrafficEvent = {
+        ts: evt.ts ?? Date.now(),
+        streamId: evt.streamId,
+        streamName: evt.streamName,
+        type: evt.type,
+        message: evt.message,
+        severity: evt.severity ?? "info",
+      };
+
+      setTrafficLogs((prev) => [e, ...prev].slice(0, trafficLimit));
+    },
+    [trafficLimit]
+  );
+
   // ---------- Activity Logs insert (best-effort, never blocks UI) ----------
   const logActivity = useCallback(
-    async (row: Omit<ActivityLogInsert, "actor_email" | "actor_id"> & { actor_id?: string | null; actor_email?: string | null }) => {
+    async (
+      row: Omit<ActivityLogInsert, "actor_email" | "actor_id"> & {
+        actor_id?: string | null;
+        actor_email?: string | null;
+      }
+    ) => {
       try {
         let actor_email = row.actor_email ?? null;
         let actor_id = row.actor_id ?? null;
@@ -222,7 +276,7 @@ export const StreamManager: React.FC = () => {
     []
   );
 
-  // ✅ Fetch activity logs moved here
+  // ✅ Fetch activity logs
   const fetchLogs = useCallback(async () => {
     setLogsLoading(true);
     try {
@@ -243,7 +297,7 @@ export const StreamManager: React.FC = () => {
     }
   }, [logsLimit, toast]);
 
-  // When switching to logs tab, auto-load once
+  // When switching to logs tab, auto-load
   useEffect(() => {
     if (activeTab !== "logs") return;
     void fetchLogs();
@@ -918,6 +972,16 @@ export const StreamManager: React.FC = () => {
                   }}
                   reloadSignal={reloadSignals[stream.id] || 0}
                   onBitrateUpdate={(id, br) => void handleBitrateUpdate(id, br)}
+                  onTrafficEvent={(evt) => {
+                    pushTraffic({
+                      ts: evt.ts,
+                      streamId: evt.streamId,
+                      streamName: evt.streamName,
+                      type: evt.type,
+                      message: evt.message,
+                      severity: evt.severity ?? "info",
+                    });
+                  }}
                   canRemove={true}
                   status={(failureCounts[stream.id] || 0) === 0 ? "online" : "offline"}
                 />
@@ -927,11 +991,12 @@ export const StreamManager: React.FC = () => {
         )}
       </div>
 
-      {/* ✅ Tabs: Bitrate (Real-time) + Activity Logs */}
+      {/* ✅ Tabs: Bitrate + Traffic Logs + Activity Logs */}
       <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as any)} className="mt-4">
         <div className="flex items-center justify-between gap-3">
           <TabsList>
             <TabsTrigger value="bitrate">Bitrate Real-time</TabsTrigger>
+            <TabsTrigger value="traffic">Traffic Logs (Real-time)</TabsTrigger>
             <TabsTrigger value="logs">Activity Logs</TabsTrigger>
           </TabsList>
 
@@ -950,6 +1015,25 @@ export const StreamManager: React.FC = () => {
 
               <Button variant="outline" size="sm" onClick={() => void fetchLogs()}>
                 Refresh
+              </Button>
+            </div>
+          )}
+
+          {activeTab === "traffic" && (
+            <div className="flex items-center gap-2">
+              <Label className="text-xs text-muted-foreground">Keep:</Label>
+              <select
+                className="h-9 rounded-md border bg-background px-3 text-sm"
+                value={String(trafficLimit)}
+                onChange={(e) => setTrafficLimit(Number(e.target.value) as any)}
+              >
+                <option value="100">100</option>
+                <option value="300">300</option>
+                <option value="500">500</option>
+              </select>
+
+              <Button variant="outline" size="sm" onClick={() => setTrafficLogs([])}>
+                Clear
               </Button>
             </div>
           )}
@@ -1003,6 +1087,66 @@ export const StreamManager: React.FC = () => {
               </Card>
             </div>
           )}
+        </TabsContent>
+
+        {/* ✅ Traffic Logs Tab */}
+        <TabsContent value="traffic">
+          <section className="rounded-xl border p-4 mt-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-semibold">Traffic Logs (Real-time)</h3>
+                <p className="text-xs text-muted-foreground">
+                  Black / Frozen / Silent / No-signal / Buffering events (live)
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-3 rounded-lg border overflow-hidden">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-[190px]">Time</TableHead>
+                    <TableHead className="w-[180px]">Stream</TableHead>
+                    <TableHead className="w-[120px]">Type</TableHead>
+                    <TableHead className="w-[120px]">Severity</TableHead>
+                    <TableHead>Message</TableHead>
+                  </TableRow>
+                </TableHeader>
+
+                <TableBody>
+                  {trafficLogs.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={5} className="text-sm text-muted-foreground py-6 text-center">
+                        No traffic events yet.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    trafficLogs.map((t, idx) => (
+                      <TableRow key={`${t.ts}-${t.streamId}-${idx}`}>
+                        <TableCell className="text-xs font-mono">{formatDateTime(new Date(t.ts).toISOString())}</TableCell>
+                        <TableCell className="text-sm">{t.streamName}</TableCell>
+                        <TableCell className="text-sm font-semibold">{t.type}</TableCell>
+                        <TableCell className="text-sm">
+                          <span
+                            className={
+                              t.severity === "critical"
+                                ? "text-red-500 font-semibold"
+                                : t.severity === "warn"
+                                ? "text-yellow-500 font-semibold"
+                                : "text-muted-foreground"
+                            }
+                          >
+                            {t.severity}
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-sm">{t.message}</TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </section>
         </TabsContent>
 
         {/* ✅ Activity Logs Tab */}
