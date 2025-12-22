@@ -174,6 +174,10 @@ const trafficTypeLabel = (t: TrafficEventType) => {
   }
 };
 
+// ✅ NEW: localStorage keys (graph persistence)
+const HISTORY_KEY = "streamwall_allBitrateHistory_v1";
+const SELECTED_STREAM_KEY = "streamwall_selectedGraphStream_v1";
+
 export const StreamManager: React.FC = () => {
   const { toast } = useToast();
 
@@ -227,11 +231,56 @@ export const StreamManager: React.FC = () => {
     return new Date(now - ms).toISOString();
   };
 
-  const makeRangeLabel = (range: DownloadRange) => (range === "1h" ? "last_1_hour" : range === "24h" ? "last_24_hours" : "all_time");
+  const makeRangeLabel = (range: DownloadRange) =>
+    range === "1h" ? "last_1_hour" : range === "24h" ? "last_24_hours" : "all_time";
 
   const logsRangeLabel = useMemo(() => {
     return logsLimit === 50 ? "Last 50" : logsLimit === 200 ? "Last 200" : "Last 500";
   }, [logsLimit]);
+
+  // ✅ NEW: restore bitrate history + selected stream from localStorage (on mount)
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(HISTORY_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as AllBitrateDataPoint[];
+        if (Array.isArray(parsed)) setAllBitrateHistory(parsed);
+      }
+    } catch {
+      // ignore
+    }
+
+    try {
+      const sel = localStorage.getItem(SELECTED_STREAM_KEY);
+      if (sel) setSelectedGraphStream(sel);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // ✅ NEW: persist selected stream
+  useEffect(() => {
+    try {
+      localStorage.setItem(SELECTED_STREAM_KEY, selectedGraphStream);
+    } catch {
+      // ignore
+    }
+  }, [selectedGraphStream]);
+
+  // ✅ NEW: persist history (throttled)
+  useEffect(() => {
+    const id = window.setTimeout(() => {
+      try {
+        // keep a reasonable limit to avoid localStorage bloat
+        const trimmed = allBitrateHistory.slice(-5000);
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(trimmed));
+      } catch {
+        // ignore
+      }
+    }, 500);
+
+    return () => window.clearTimeout(id);
+  }, [allBitrateHistory]);
 
   // ---------- Activity Logs insert (best-effort) ----------
   const logActivity = useCallback(
@@ -381,7 +430,14 @@ export const StreamManager: React.FC = () => {
   // --------- URL validation ----------
   const isValidStreamUrl = (url: string): boolean => {
     const lowerUrl = url.trim().toLowerCase();
-    return lowerUrl.startsWith("http://") || lowerUrl.startsWith("https://") || lowerUrl.includes(".m3u8") || lowerUrl.startsWith("rtmp://") || lowerUrl.startsWith("rtsp://") || lowerUrl.startsWith("udp://");
+    return (
+      lowerUrl.startsWith("http://") ||
+      lowerUrl.startsWith("https://") ||
+      lowerUrl.includes(".m3u8") ||
+      lowerUrl.startsWith("rtmp://") ||
+      lowerUrl.startsWith("rtsp://") ||
+      lowerUrl.startsWith("udp://")
+    );
   };
 
   // --------- Load streams from DB ----------
@@ -410,6 +466,63 @@ export const StreamManager: React.FC = () => {
   useEffect(() => {
     void loadStreamsFromDb();
   }, [loadStreamsFromDb]);
+
+  // ✅ NEW: restore bitrate history from DB on load (after streams are loaded)
+  const didRestoreHistoryRef = useRef(false);
+
+  const restoreBitrateHistoryFromDb = useCallback(async () => {
+    if (didRestoreHistoryRef.current) return;
+    if (streams.length === 0) return;
+
+    const { data: authData, error: authErr } = await supabase.auth.getUser();
+    const authUser = authData?.user;
+    if (authErr || !authUser) return;
+
+    const sinceIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    const { data, error } = await supabase
+      .from("bitrate_logs")
+      .select("created_at, stream_id, bitrate_mbps")
+      .eq("user_id", authUser.id)
+      .gte("created_at", sinceIso)
+      .order("created_at", { ascending: true });
+
+    if (error) {
+      console.warn("restore bitrate_logs failed:", error.message);
+      return;
+    }
+
+    const rows = (data || []) as Array<{ created_at: string; stream_id: string; bitrate_mbps: number }>;
+
+    const points: AllBitrateDataPoint[] = [];
+    let lastPoint: AllBitrateDataPoint | null = null;
+
+    for (const r of rows) {
+      const t = new Date(r.created_at).getTime();
+
+      let p = lastPoint;
+      if (!p || p.time !== t) {
+        const next: AllBitrateDataPoint = { time: t };
+        for (const s of streams) next[s.id] = lastPoint ? ((lastPoint[s.id] ?? 0) as number) : 0;
+        points.push(next);
+        p = next;
+        lastPoint = next;
+      }
+
+      p[r.stream_id] = Number(r.bitrate_mbps ?? 0);
+    }
+
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    const filtered = points.filter((x) => x.time >= cutoff);
+
+    setAllBitrateHistory(filtered);
+    didRestoreHistoryRef.current = true;
+  }, [streams]);
+
+  useEffect(() => {
+    if (streams.length === 0) return;
+    void restoreBitrateHistoryFromDb();
+  }, [streams, restoreBitrateHistoryFromDb]);
 
   // --------- Bitrate updates (graph + DB) ----------
   const handleBitrateUpdate = useCallback(
@@ -559,7 +672,15 @@ export const StreamManager: React.FC = () => {
 
       // 1) Push to UI
       if (!trafficPaused) {
-        const uiEvt: TrafficEvent = { ts, streamId: evt.streamId, streamName: evt.streamName, streamUrl: streamUrl ?? undefined, type: evt.type, message: evt.message, severity };
+        const uiEvt: TrafficEvent = {
+          ts,
+          streamId: evt.streamId,
+          streamName: evt.streamName,
+          streamUrl: streamUrl ?? undefined,
+          type: evt.type,
+          message: evt.message,
+          severity,
+        };
         const key = makeTrafficKey(uiEvt);
         if (!trafficSeenRef.current.has(key)) {
           trafficSeenRef.current.add(key);
