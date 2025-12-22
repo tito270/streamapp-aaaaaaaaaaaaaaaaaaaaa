@@ -252,17 +252,6 @@ const ManagementDialog: React.FC<ManagementDialogProps> = ({ isOpen, onClose, on
           <div className="flex items-center justify-between gap-3">
             <DialogTitle>Settings</DialogTitle>
 
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  void fetchStreams();
-                }}
-              >
-                Refresh
-              </Button>
-            </div>
           </div>
         </DialogHeader>
 
