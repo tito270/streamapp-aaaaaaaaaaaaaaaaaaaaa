@@ -5,36 +5,37 @@ const MOBILE_BREAKPOINT = 768;
 function isRunningAsPWA() {
   return (
     window.matchMedia("(display-mode: standalone)").matches ||
-    // iOS Add to Home Screen
+    // iOS
     // @ts-ignore
     window.navigator.standalone === true
   );
 }
 
 export function useIsMobile() {
-  const [isMobile, setIsMobile] = React.useState<boolean>(false);
+  const [isMobile, setIsMobile] = React.useState(false);
 
   React.useEffect(() => {
     const update = () => {
-      // ✅ If installed as app: treat it as NOT mobile (desktop layout)
-      if (isRunningAsPWA()) {
+      const isPWA = isRunningAsPWA();
+
+      // ✅ Desktop layout ONLY when installed AND wide enough
+      if (isPWA && window.innerWidth >= 1024) {
         setIsMobile(false);
         return;
       }
 
-      // Normal browser behavior
+      // ✅ Mobile layout on small screens
       setIsMobile(window.innerWidth < MOBILE_BREAKPOINT);
     };
 
-    const mql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`);
-
     update();
-    mql.addEventListener?.("change", update);
+
     window.addEventListener("resize", update);
+    window.addEventListener("orientationchange", update);
 
     return () => {
-      mql.removeEventListener?.("change", update);
       window.removeEventListener("resize", update);
+      window.removeEventListener("orientationchange", update);
     };
   }, []);
 
