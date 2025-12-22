@@ -10,6 +10,17 @@ import { useToast } from "@/components/ui/use-toast";
 const AllBitrateGraph = React.lazy(() => import("./ui/AllBitrateGraph"));
 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Label } from "@/components/ui/label";
 
 import { getUser, logout, UserPayload } from "@/lib/auth";
 import ManagementDialog from "./ManagementDialog";
@@ -85,7 +96,46 @@ type ActivityLogInsert = {
   description?: string | null;
 };
 
+type DbActivityLog = {
+  id: string;
+  created_at: string;
+  actor_email: string | null;
+  action: string;
+  target_type: string | null;
+  target_name: string | null;
+  description: string | null;
+};
+
 const safeTrim = (v: unknown) => String(v ?? "").trim();
+
+const formatDateTime = (iso: string) => {
+  try {
+    const d = new Date(iso);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mi = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
+  } catch {
+    return iso;
+  }
+};
+
+const actionLabel = (a: string) => {
+  const x = (a || "").toLowerCase();
+  if (x === "add_stream") return "Add Stream";
+  if (x === "delete_stream") return "Delete Stream";
+  if (x === "edit_stream") return "Edit Stream";
+  if (x === "save_list") return "Save List";
+  if (x === "load_list") return "Load List";
+  if (x === "change_password") return "Change Password";
+  if (x === "login") return "Login";
+  if (x === "logout") return "Logout";
+  if (x === "download_bitrate_csv") return "Download Bitrate CSV";
+  return a;
+};
 
 export const StreamManager: React.FC = () => {
   const { toast } = useToast();
@@ -111,6 +161,14 @@ export const StreamManager: React.FC = () => {
   // Download range selector for bitrate CSV
   const [downloadRange, setDownloadRange] = useState<DownloadRange>("24h");
 
+  // ✅ Tabs
+  const [activeTab, setActiveTab] = useState<"bitrate" | "logs">("bitrate");
+
+  // ✅ Activity logs moved here
+  const [logs, setLogs] = useState<DbActivityLog[]>([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logsLimit, setLogsLimit] = useState(200);
+
   const normalizeUrl = (url: string) => url.trim().toLowerCase().replace(/\/$/, "");
 
   // ---------- Helpers ----------
@@ -126,11 +184,14 @@ export const StreamManager: React.FC = () => {
   const makeRangeLabel = (range: DownloadRange) =>
     range === "1h" ? "last_1_hour" : range === "24h" ? "last_24_hours" : "all_time";
 
+  const logsRangeLabel = useMemo(() => {
+    return logsLimit === 50 ? "Last 50" : logsLimit === 200 ? "Last 200" : "Last 500";
+  }, [logsLimit]);
+
   // ---------- Activity Logs insert (best-effort, never blocks UI) ----------
   const logActivity = useCallback(
     async (row: Omit<ActivityLogInsert, "actor_email" | "actor_id"> & { actor_id?: string | null; actor_email?: string | null }) => {
       try {
-        // Get actor email/id if not provided
         let actor_email = row.actor_email ?? null;
         let actor_id = row.actor_id ?? null;
 
@@ -153,16 +214,40 @@ export const StreamManager: React.FC = () => {
         };
 
         const { error } = await supabase.from("activity_logs").insert(payload);
-        if (error) {
-          // Don’t toast; just log. This avoids spamming UI if RLS is wrong.
-          console.warn("activity_logs insert blocked/failed:", error.message);
-        }
+        if (error) console.warn("activity_logs insert blocked/failed:", error.message);
       } catch (e) {
         console.warn("activity_logs insert exception:", e);
       }
     },
     []
   );
+
+  // ✅ Fetch activity logs moved here
+  const fetchLogs = useCallback(async () => {
+    setLogsLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from("activity_logs")
+        .select("id, created_at, actor_email, action, target_type, target_name, description")
+        .order("created_at", { ascending: false })
+        .limit(logsLimit);
+
+      if (error) {
+        toast({ title: "Failed to load activity logs", description: error.message, variant: "destructive" });
+        setLogs([]);
+        return;
+      }
+      setLogs((data || []) as DbActivityLog[]);
+    } finally {
+      setLogsLoading(false);
+    }
+  }, [logsLimit, toast]);
+
+  // When switching to logs tab, auto-load once
+  useEffect(() => {
+    if (activeTab !== "logs") return;
+    void fetchLogs();
+  }, [activeTab, fetchLogs]);
 
   // --------- Bitrate DB buffer ----------
   const bitrateBufferRef = useRef<BitrateLogRow[]>([]);
@@ -228,7 +313,7 @@ export const StreamManager: React.FC = () => {
     return (
       lowerUrl.startsWith("http://") ||
       lowerUrl.startsWith("https://") ||
-      lowerUrl.includes(".m3u8") || // HLS
+      lowerUrl.includes(".m3u8") ||
       lowerUrl.startsWith("rtmp://") ||
       lowerUrl.startsWith("rtsp://") ||
       lowerUrl.startsWith("udp://")
@@ -379,7 +464,6 @@ export const StreamManager: React.FC = () => {
 
     toast({ title: "Stream Added", description: `(${streams.length + 1}/12)` });
 
-    // Activity log
     void logActivity({
       action: "add_stream",
       target_type: "stream",
@@ -581,7 +665,6 @@ export const StreamManager: React.FC = () => {
       return;
     }
 
-    // bitrate displayed with 2 decimals + unit Mbps
     const header = ["created_at", "stream_name", "stream_url", "bitrate"];
     const escape = (v: unknown) => {
       const s = String(v ?? "");
@@ -727,7 +810,7 @@ export const StreamManager: React.FC = () => {
                   <Save className="h-4 w-4 mr-2" /> Save List
                 </Button>
 
-                {/* LOAD LIST (LOCAL MACHINE) */}
+                {/* LOAD LIST */}
                 <label htmlFor="load-list-file" className="inline-block">
                   <input id="load-list-file" type="file" accept=".txt" style={{ display: "none" }} onChange={loadListFromFile} />
                   <Button asChild variant="outline">
@@ -776,7 +859,6 @@ export const StreamManager: React.FC = () => {
                   size="icon"
                   title="Logout"
                   onClick={async () => {
-                    // log before leaving
                     void logActivity({ action: "logout", description: "User logged out" });
                     await logout();
                     window.location.href = "/login";
@@ -793,7 +875,6 @@ export const StreamManager: React.FC = () => {
       <ManagementDialog
         isOpen={isManagementOpen}
         onClose={() => setManagementOpen(false)}
-        // Optional: allow dialog to refresh streams after edit
         onStreamsChanged={() => void loadStreamsFromDb()}
       />
 
@@ -846,53 +927,135 @@ export const StreamManager: React.FC = () => {
         )}
       </div>
 
-      {/* Bitrate Graph */}
-      {streams.length > 0 && (
-        <div className="mt-4">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-baseline gap-3">
-              <h2 className="text-2xl font-bold text-white">Real-time Bitrate Monitor:</h2>
-              <span className="text-lg font-semibold text-blue-500">{latestTotalBitrate.toFixed(2)} Mbps</span>
+      {/* ✅ Tabs: Bitrate (Real-time) + Activity Logs */}
+      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as any)} className="mt-4">
+        <div className="flex items-center justify-between gap-3">
+          <TabsList>
+            <TabsTrigger value="bitrate">Bitrate Real-time</TabsTrigger>
+            <TabsTrigger value="logs">Activity Logs</TabsTrigger>
+          </TabsList>
+
+          {activeTab === "logs" && (
+            <div className="flex items-center gap-2">
+              <Label className="text-xs text-muted-foreground">Logs:</Label>
+              <select
+                className="h-9 rounded-md border bg-background px-3 text-sm"
+                value={String(logsLimit)}
+                onChange={(e) => setLogsLimit(Number(e.target.value) as any)}
+              >
+                <option value="50">Last 50</option>
+                <option value="200">Last 200</option>
+                <option value="500">Last 500</option>
+              </select>
+
+              <Button variant="outline" size="sm" onClick={() => void fetchLogs()}>
+                Refresh
+              </Button>
+            </div>
+          )}
+        </div>
+
+        {/* ✅ Bitrate Tab */}
+        <TabsContent value="bitrate">
+          {streams.length > 0 && (
+            <div className="mt-4">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-baseline gap-3">
+                  <h2 className="text-2xl font-bold text-white">Real-time Bitrate Monitor:</h2>
+                  <span className="text-lg font-semibold text-blue-500">{latestTotalBitrate.toFixed(2)} Mbps</span>
+                </div>
+
+                <Select value={selectedGraphStream} onValueChange={setSelectedGraphStream}>
+                  <SelectTrigger className="w-[240px] bg-input border-stream-border">
+                    <SelectValue placeholder="Select a stream to display" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Streams</SelectItem>
+                    {streams.map((stream) => (
+                      <SelectItem key={stream.id} value={stream.id}>
+                        <div className="flex items-center">
+                          <div className="w-4 h-4 rounded-full mr-2" style={{ backgroundColor: stream.color }} />
+                          {stream.name}
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <Card className="bg-gradient-card border-stream-border">
+                <CardContent className="pt-2">
+                  <React.Suspense
+                    fallback={
+                      <div style={{ height: 600, display: "flex", alignItems: "center", justifyContent: "center", color: "#aaa" }}>
+                        Loading chart…
+                      </div>
+                    }
+                  >
+                    <AllBitrateGraph
+                      data={allBitrateHistory}
+                      streams={selectedGraphStream === "all" ? streams : streams.filter((s) => s.id === selectedGraphStream)}
+                      timeDomain={[currentTime.getTime() - 24 * 60 * 60 * 1000, currentTime.getTime()]}
+                      height={600}
+                    />
+                  </React.Suspense>
+                </CardContent>
+              </Card>
+            </div>
+          )}
+        </TabsContent>
+
+        {/* ✅ Activity Logs Tab */}
+        <TabsContent value="logs">
+          <section className="rounded-xl border p-4 mt-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-semibold">Activity Logs</h3>
+                <p className="text-xs text-muted-foreground">Timeline style (Table Format) — {logsRangeLabel}</p>
+              </div>
+              {logsLoading && <span className="text-sm text-muted-foreground">Loading…</span>}
             </div>
 
-            <Select value={selectedGraphStream} onValueChange={setSelectedGraphStream}>
-              <SelectTrigger className="w-[240px] bg-input border-stream-border">
-                <SelectValue placeholder="Select a stream to display" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All Streams</SelectItem>
-                {streams.map((stream) => (
-                  <SelectItem key={stream.id} value={stream.id}>
-                    <div className="flex items-center">
-                      <div className="w-4 h-4 rounded-full mr-2" style={{ backgroundColor: stream.color }} />
-                      {stream.name}
-                    </div>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+            <div className="mt-3 rounded-lg border overflow-hidden">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-[190px]">Time</TableHead>
+                    <TableHead className="w-[220px]">User</TableHead>
+                    <TableHead className="w-[180px]">Action</TableHead>
+                    <TableHead className="w-[220px]">Target</TableHead>
+                    <TableHead>Description</TableHead>
+                  </TableRow>
+                </TableHeader>
 
-          <Card className="bg-gradient-card border-stream-border">
-            <CardContent className="pt-2">
-              <React.Suspense
-                fallback={
-                  <div style={{ height: 600, display: "flex", alignItems: "center", justifyContent: "center", color: "#aaa" }}>
-                    Loading chart…
-                  </div>
-                }
-              >
-                <AllBitrateGraph
-                  data={allBitrateHistory}
-                  streams={selectedGraphStream === "all" ? streams : streams.filter((s) => s.id === selectedGraphStream)}
-                  timeDomain={[currentTime.getTime() - 24 * 60 * 60 * 1000, currentTime.getTime()]}
-                  height={600}
-                />
-              </React.Suspense>
-            </CardContent>
-          </Card>
-        </div>
-      )}
+                <TableBody>
+                  {logs.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={5} className="text-sm text-muted-foreground py-6 text-center">
+                        No activity logs yet.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    logs.map((l) => (
+                      <TableRow key={l.id}>
+                        <TableCell className="text-xs font-mono">{formatDateTime(l.created_at)}</TableCell>
+                        <TableCell className="text-sm">{l.actor_email || "unknown"}</TableCell>
+                        <TableCell className="text-sm font-semibold">{actionLabel(l.action)}</TableCell>
+                        <TableCell className="text-sm">
+                          {(l.target_type || "—") + (l.target_name ? ` — ${l.target_name}` : "")}
+                        </TableCell>
+                        <TableCell className="text-sm">{l.description || "—"}</TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </section>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 };
+
+export default StreamManager;
