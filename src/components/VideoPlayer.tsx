@@ -18,6 +18,8 @@ interface VideoPlayerProps {
   status?: "online" | "offline";
   onBitrateUpdate?: (streamId: string, bitrate: number | null) => void;
   className?: string;
+
+  // ✅ Traffic events
   onTrafficEvent?: (evt: {
     ts?: number;
     streamId: string;
@@ -28,6 +30,7 @@ interface VideoPlayerProps {
   }) => void;
 }
 
+// Cache busting
 const withCacheBuster = (url: string) => {
   const tick = Date.now().toString();
   try {
@@ -61,8 +64,10 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
   const [hasError, setHasError] = useState(false);
   const [errorText, setErrorText] = useState<string>("");
   const [isLoading, setIsLoading] = useState(true);
+
   const [isVisible, setIsVisible] = useState(true);
   const [computedStatus, setComputedStatus] = useState<"online" | "offline">("online");
+
   const [measuredBitrate, setMeasuredBitrate] = useState<number | null>(null);
   const [showControls, setShowControls] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
@@ -71,13 +76,11 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
 
   const fragLoadedRef = useRef(false);
   const manifestWatchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const retryCountRef = useRef(0);
   const MAX_RETRIES = 8;
 
-  // 🔥 Track active issues (per type)
-  const activeIssuesRef = useRef<Set<TrafficEventType>>(new Set());
-
-  // traffic dedupe
+  // traffic dedupe (avoid spamming same message)
   const lastEvtRef = useRef<{ key: string; at: number } | null>(null);
 
   const emitTraffic = useCallback(
@@ -86,6 +89,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
       const now = Date.now();
       const last = lastEvtRef.current;
 
+      // dedupe same event within 10 seconds
       if (last && last.key === key && now - last.at < 10_000) return;
 
       lastEvtRef.current = { key, at: now };
@@ -140,7 +144,6 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
 
     fragLoadedRef.current = false;
     setIsPlaying(false);
-    activeIssuesRef.current.clear(); // 🔥 Clear issues on teardown
   }, []);
 
   const initializeStream = useCallback(async () => {
@@ -156,11 +159,11 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     setHasError(false);
     setErrorText("");
     fragLoadedRef.current = false;
-    activeIssuesRef.current.clear(); // 🔥 Reset issues on init
 
     if (manifestWatchRef.current) clearTimeout(manifestWatchRef.current);
     teardownPlayer();
 
+    // Frontend-only: only HLS .m3u8
     if (!isHlsUrl(streamUrl)) {
       setIsLoading(false);
       emitTraffic("ERROR", "This stream type needs a backend (RTMP/RTSP/UDP). Use an HLS .m3u8 URL.", "warn");
@@ -169,11 +172,10 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
 
     const finalStreamUrl = withCacheBuster(streamUrl);
 
+    // Watchdog: manifest loads but no fragments
     manifestWatchRef.current = setTimeout(() => {
       if (!fragLoadedRef.current) {
-        const type: TrafficEventType = "NO_SIGNAL";
-        activeIssuesRef.current.add(type); // 🔥 Track issue
-        emitTraffic(type, "No HLS fragments received (timeout). Check CORS/403/blocked segments.", "critical");
+        emitTraffic("NO_SIGNAL", "No HLS fragments received (timeout). Check CORS/403/blocked segments.", "critical");
         handleError("No HLS fragments received (timeout). Check CORS/403/blocked .ts/.m4s segments.");
       }
     }, 12_000);
@@ -226,14 +228,8 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
         if (data.fatal) {
           emitTraffic("ERROR", `HLS fatal: ${type}/${details} ${statusCode}`.trim(), "critical");
 
-          if (
-            String(type).toLowerCase().includes("network") ||
-            String(details).toLowerCase().includes("frag") ||
-            String(details).toLowerCase().includes("manifest")
-          ) {
-            const issueType: TrafficEventType = "NO_SIGNAL";
-            activeIssuesRef.current.add(issueType); // 🔥 Track issue
-            emitTraffic(issueType, `HLS fatal network issue: ${details} ${statusCode}`.trim(), "critical");
+          if (String(type).toLowerCase().includes("network") || String(details).toLowerCase().includes("frag") || String(details).toLowerCase().includes("manifest")) {
+            emitTraffic("NO_SIGNAL", `HLS fatal network issue: ${details} ${statusCode}`.trim(), "critical");
           }
 
           handleError(`HLS fatal: ${type} / ${details} ${statusCode}`.trim());
@@ -249,8 +245,6 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
           .then(() => {
             setIsPlaying(true);
             retryCountRef.current = 0;
-            // 🔥 No active issues after successful play
-            activeIssuesRef.current.clear();
           })
           .catch((err) => {
             emitTraffic("ERROR", `Playback failed: ${String(err)}`, "critical");
@@ -277,7 +271,6 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
             .then(() => {
               setIsPlaying(true);
               retryCountRef.current = 0;
-              activeIssuesRef.current.clear();
             })
             .catch((err) => {
               emitTraffic("ERROR", `Playback failed: ${String(err)}`, "critical");
@@ -320,6 +313,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     else setComputedStatus("offline");
   }, [status, measuredBitrate]);
 
+  // Visibility observer
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -329,6 +323,7 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     return () => observer.disconnect();
   }, []);
 
+  // Start on mount + whenever streamUrl changes/reloadKey changes
   useEffect(() => {
     retryCountRef.current = 0;
     initializeStream();
@@ -382,39 +377,23 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
     else video.requestFullscreen();
   };
 
-  // 🔥 SMART RECOVERY: emit RECOVERED only if there were active issues
+  // Buffering / recovered events
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
 
-    const onPlaying = () => {
-      if (activeIssuesRef.current.size > 0) {
-        // Only emit if there was an issue
-        emitTraffic("RECOVERED", "Playback resumed after issue", "info");
-        activeIssuesRef.current.clear(); // 🔥 Clear after recovery
-      }
-    };
+    const onWaiting = () => emitTraffic("BUFFERING", "Video waiting (buffering)", "info");
+    const onStalled = () => emitTraffic("BUFFERING", "Video stalled", "warn");
+    const onPlaying = () => emitTraffic("RECOVERED", "Playback resumed", "info");
 
-    const onWaiting = () => {
-      const type: TrafficEventType = "BUFFERING";
-      activeIssuesRef.current.add(type);
-      emitTraffic(type, "Video waiting (buffering)", "info");
-    };
-
-    const onStalled = () => {
-      const type: TrafficEventType = "BUFFERING";
-      activeIssuesRef.current.add(type);
-      emitTraffic(type, "Video stalled", "warn");
-    };
-
-    v.addEventListener("playing", onPlaying);
     v.addEventListener("waiting", onWaiting);
     v.addEventListener("stalled", onStalled);
+    v.addEventListener("playing", onPlaying);
 
     return () => {
-      v.removeEventListener("playing", onPlaying);
       v.removeEventListener("waiting", onWaiting);
       v.removeEventListener("stalled", onStalled);
+      v.removeEventListener("playing", onPlaying);
     };
   }, [emitTraffic]);
 
@@ -432,17 +411,12 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
       const t = v.currentTime;
       const diff = Math.abs(t - freezeRef.current.lastT);
 
-      if (diff < 0.01) {
-        freezeRef.current.stuck += 1;
-        if (freezeRef.current.stuck === 8 && !activeIssuesRef.current.has("FROZEN")) {
-          activeIssuesRef.current.add("FROZEN");
-          emitTraffic("FROZEN", "Video currentTime not advancing for ~8s", "warn");
-        }
-      } else {
-        freezeRef.current.stuck = 0;
-      }
+      if (diff < 0.01) freezeRef.current.stuck += 1;
+      else freezeRef.current.stuck = 0;
 
       freezeRef.current.lastT = t;
+
+      if (freezeRef.current.stuck === 8) emitTraffic("FROZEN", "Video currentTime not advancing for ~8s", "warn");
     }, 1000);
 
     return () => clearInterval(id);
@@ -463,21 +437,16 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
       const avg = (audioLevels.left + audioLevels.right) / 2;
       const SILENCE_THRESHOLD = 0.01;
 
-      if (avg < SILENCE_THRESHOLD) {
-        silenceRef.current.hits += 1;
-        if (silenceRef.current.hits === 10 && !activeIssuesRef.current.has("SILENT")) {
-          activeIssuesRef.current.add("SILENT");
-          emitTraffic("SILENT", "Audio appears silent for ~10s while playback is active", "warn");
-        }
-      } else {
-        silenceRef.current.hits = 0;
-      }
+      if (avg < SILENCE_THRESHOLD) silenceRef.current.hits += 1;
+      else silenceRef.current.hits = 0;
+
+      if (silenceRef.current.hits === 10) emitTraffic("SILENT", "Audio appears silent for ~10s while playback is active", "warn");
     }, 1000);
 
     return () => clearInterval(id);
   }, [hasError, isLoading, emitTraffic, audioLevels.left, audioLevels.right]);
 
-  // Black frame detector
+  // Black frame detector (best-effort; CORS may block)
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const blackRef = useRef({ hits: 0 });
 
@@ -510,23 +479,21 @@ const VideoPlayerMemo: React.FC<VideoPlayerProps> = ({
         for (let i = 0; i < img.length; i += 4) sum += (img[i] + img[i + 1] + img[i + 2]) / 3;
         const avgBrightness = sum / (img.length / 4);
 
-        if (avgBrightness < 12) {
-          blackRef.current.hits += 1;
-          if (blackRef.current.hits === 5 && !activeIssuesRef.current.has("BLACK")) {
-            const audioAvg = (audioLevels.left + audioLevels.right) / 2;
-            const audioPresent = audioAvg > 0.03;
-            activeIssuesRef.current.add("BLACK");
-            emitTraffic(
-              "BLACK",
-              audioPresent ? "Frame is black while audio is present" : "Frame is black (low brightness for ~10s)",
-              audioPresent ? "critical" : "warn"
-            );
-          }
-        } else {
-          blackRef.current.hits = 0;
+        if (avgBrightness < 12) blackRef.current.hits += 1;
+        else blackRef.current.hits = 0;
+
+        if (blackRef.current.hits === 5) {
+          const audioAvg = (audioLevels.left + audioLevels.right) / 2;
+          const audioPresent = audioAvg > 0.03;
+
+          emitTraffic(
+            "BLACK",
+            audioPresent ? "Frame is black while audio is present" : "Frame is black (low brightness for ~10s)",
+            audioPresent ? "critical" : "warn"
+          );
         }
       } catch {
-        // CORS error → ignore
+        // canvas blocked by CORS → ignore
       }
     }, 2000);
 
